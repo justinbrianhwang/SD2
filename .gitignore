@@ -1,0 +1,23 @@
+# Environments
+.venv/
+venv/
+
+# External links (CARLA junction)
+external/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Analysis outputs
+outputs/*
+!outputs/README.md
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
