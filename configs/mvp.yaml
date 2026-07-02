@@ -1,0 +1,50 @@
+project_name: "SD2 MVP"
+
+stages:
+  - vision
+  - semantic
+  - reasoning
+  - planning
+  - control
+  - outcome
+
+pairing:
+  key:
+    - model_id
+    - scenario_id
+    - seed
+    - frame_idx
+
+normalization:
+  method: "minmax"
+  clip_min: 0.0
+  clip_max: 1.0
+
+thresholds:
+  warning: 0.4
+  critical: 0.7
+
+metrics:
+  vision:
+    type: "embedding_cosine"
+  semantic:
+    type: "object_jaccard"
+  reasoning:
+    type: "text_embedding_and_intent"
+    weights:
+      text_embedding: 0.5
+      intent_mismatch: 0.3
+      critical_object_mismatch: 0.2
+  planning:
+    type: "waypoint_ade"
+  control:
+    type: "weighted_action_mae"
+    weights:
+      steer: 0.5
+      throttle: 0.25
+      brake: 0.25
+
+diagnosis:
+  primary_failure_policy: "first_critical_with_downstream_increase"
+  downstream_window: 5
+  epsilon: 1.0e-6
