@@ -1,1 +1,27 @@
-"""Stage-wise deviation metrics reserved for a later SD2 phase."""
+"""Stage-wise deviation metrics."""
+
+from sd2.metrics.base import (
+    MetricResult,
+    StageMetric,
+    available_metric_types,
+    build_metric,
+    register_metric,
+)
+from sd2.metrics.control import ControlWeightedMAEMetric
+from sd2.metrics.planning import PlanningADEMetric
+from sd2.metrics.reasoning import ReasoningIntentMismatchMetric
+from sd2.metrics.semantic import SemanticObjectJaccardMetric
+from sd2.metrics.vision import VisionEmbeddingCosineMetric
+
+__all__ = [
+    "ControlWeightedMAEMetric",
+    "MetricResult",
+    "PlanningADEMetric",
+    "ReasoningIntentMismatchMetric",
+    "SemanticObjectJaccardMetric",
+    "StageMetric",
+    "VisionEmbeddingCosineMetric",
+    "available_metric_types",
+    "build_metric",
+    "register_metric",
+]

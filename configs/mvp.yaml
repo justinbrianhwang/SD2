@@ -37,6 +37,7 @@ metrics:
       critical_object_mismatch: 0.2
   planning:
     type: "waypoint_ade"
+    ade_scale: 5.0
   control:
     type: "weighted_action_mae"
     weights:

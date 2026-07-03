@@ -36,12 +36,31 @@ def test_cli_analyze_sample_data(tmp_path: Path) -> None:
 
     paired_path = output_dir / "paired_frames.json"
     summary_path = output_dir / "pairing_summary.json"
+    deviation_json_path = output_dir / "deviation_table.json"
+    deviation_csv_path = output_dir / "deviation_table.csv"
     assert paired_path.is_file()
     assert summary_path.is_file()
+    assert deviation_json_path.is_file()
+    assert deviation_csv_path.is_file()
 
     paired_frames = json.loads(paired_path.read_text(encoding="utf-8"))
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    deviation_rows = json.loads(deviation_json_path.read_text(encoding="utf-8"))
 
     assert len(paired_frames) == 30
     assert summary["paired_count"] == 30
     assert summary["skipped_count"] == 0
+    assert len(deviation_rows) == 30 * 5
+    assert set(deviation_rows[0]) == {
+        "pair_key",
+        "frame_idx",
+        "timestamp",
+        "stage",
+        "metric",
+        "raw_score",
+        "normalized_score",
+        "status",
+        "missing",
+        "details",
+    }
+    assert len(deviation_csv_path.read_text(encoding="utf-8").splitlines()) == (30 * 5) + 1

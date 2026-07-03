@@ -9,6 +9,7 @@ from typing import Sequence
 
 from sd2 import __version__
 from sd2.adapters.jsonl_adapter import load_run_jsonl
+from sd2.analysis.deviation import compute_deviation_table
 from sd2.core.config import load_config
 from sd2.core.run import pair_runs
 
@@ -42,10 +43,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _run_analyze(args: argparse.Namespace) -> int:
-    load_config(args.config)
+    config = load_config(args.config)
     clean = load_run_jsonl(args.clean)
     stress = load_run_jsonl(args.stress)
     paired_run = pair_runs(clean, stress)
+    deviation_table = compute_deviation_table(paired_run, config)
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -64,6 +66,8 @@ def _run_analyze(args: argparse.Namespace) -> int:
         json.dumps(summary_payload, indent=2) + "\n",
         encoding="utf-8",
     )
+    deviation_table.write_json(output_dir / "deviation_table.json")
+    deviation_table.write_csv(output_dir / "deviation_table.csv")
 
     return 0
 
