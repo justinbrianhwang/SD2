@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -33,6 +34,8 @@ class PairingSummary(BaseModel):
     skipped_count: int
     missing_in_clean: list[int] = Field(default_factory=list)
     missing_in_stress: list[int] = Field(default_factory=list)
+    clean_metadata: dict[str, Any] = Field(default_factory=dict)
+    stress_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -93,6 +96,8 @@ def pair_runs(clean: RunLog, stress: RunLog) -> PairedRun:
         skipped_count=len(missing_in_clean) + len(missing_in_stress),
         missing_in_clean=missing_in_clean,
         missing_in_stress=missing_in_stress,
+        clean_metadata=clean.metadata.model_dump(mode="json"),
+        stress_metadata=stress.metadata.model_dump(mode="json"),
     )
     return PairedRun(pairs=pairs, summary=summary)
 

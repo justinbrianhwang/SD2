@@ -3,18 +3,13 @@
 from __future__ import annotations
 
 import argparse
-import json
+import sys
 from pathlib import Path
 from typing import Sequence
 
 from sd2 import __version__
-from sd2.adapters.jsonl_adapter import load_run_jsonl
-from sd2.analysis.diagnosis import compute_failure_diagnosis
-from sd2.analysis.deviation import compute_deviation_table
-from sd2.analysis.fingerprint import compute_robustness_fingerprint
-from sd2.analysis.propagation import compute_propagation_analysis
-from sd2.core.config import load_config
-from sd2.core.run import pair_runs
+from sd2.analysis.pipeline import run_analysis
+from sd2.reports.markdown import generate_fingerprint_summary, generate_report
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,11 +19,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"sd2 {__version__}")
 
     subparsers = parser.add_subparsers(dest="command")
+
     analyze = subparsers.add_parser("analyze", help="pair clean and stress run logs")
     analyze.add_argument("--clean", required=True, help="path to clean run JSONL")
     analyze.add_argument("--stress", required=True, help="path to stress run JSONL")
     analyze.add_argument("--config", required=True, help="path to YAML config")
     analyze.add_argument("--output", required=True, help="output directory")
+    analyze.add_argument(
+        "--report",
+        action="store_true",
+        help="generate report.md and plots after analysis",
+    )
+
+    report = subparsers.add_parser("report", help="generate a Markdown report")
+    report.add_argument("--analysis-dir", required=True, help="analysis output directory")
+    report.add_argument(
+        "--output",
+        help="report path, default: <analysis-dir>/report.md",
+    )
+
+    fingerprint = subparsers.add_parser(
+        "fingerprint",
+        help="aggregate fingerprint.json files into a Markdown summary",
+    )
+    fingerprint.add_argument(
+        "--analysis-dir",
+        required=True,
+        help="analysis directory or parent directory containing analyses",
+    )
+    fingerprint.add_argument("--output", required=True, help="summary Markdown path")
     return parser
 
 
@@ -40,49 +59,44 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "analyze":
         return _run_analyze(args)
+    if args.command == "report":
+        return _run_report(args)
+    if args.command == "fingerprint":
+        return _run_fingerprint(args)
 
     parser.print_help()
     return 0
 
 
 def _run_analyze(args: argparse.Namespace) -> int:
-    config = load_config(args.config)
-    clean = load_run_jsonl(args.clean)
-    stress = load_run_jsonl(args.stress)
-    paired_run = pair_runs(clean, stress)
-    deviation_table = compute_deviation_table(paired_run, config)
-    propagation_result = compute_propagation_analysis(deviation_table, config)
-    diagnosis_result = compute_failure_diagnosis(
-        deviation_table,
-        propagation_result,
-        paired_run,
-        config,
+    run_analysis(
+        clean_path=args.clean,
+        stress_path=args.stress,
+        config_path=args.config,
+        output_dir=args.output,
+        report=bool(args.report),
     )
-    fingerprint = compute_robustness_fingerprint(deviation_table, config)
+    return 0
 
-    output_dir = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
-    paired_payload = [
-        paired.model_dump(mode="json")
-        for paired in paired_run.pairs
-    ]
-    summary_payload = paired_run.summary.model_dump(mode="json")
+def _run_report(args: argparse.Namespace) -> int:
+    try:
+        generate_report(
+            analysis_dir=args.analysis_dir,
+            output_path=Path(args.output) if args.output else None,
+        )
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    return 0
 
-    (output_dir / "paired_frames.json").write_text(
-        json.dumps(paired_payload, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    (output_dir / "pairing_summary.json").write_text(
-        json.dumps(summary_payload, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    deviation_table.write_json(output_dir / "deviation_table.json")
-    deviation_table.write_csv(output_dir / "deviation_table.csv")
-    propagation_result.write_json(output_dir / "propagation.json")
-    diagnosis_result.write_json(output_dir / "diagnosis.json")
-    fingerprint.write_json(output_dir / "fingerprint.json")
 
+def _run_fingerprint(args: argparse.Namespace) -> int:
+    try:
+        generate_fingerprint_summary(args.analysis_dir, args.output)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 
