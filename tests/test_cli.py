@@ -38,14 +38,23 @@ def test_cli_analyze_sample_data(tmp_path: Path) -> None:
     summary_path = output_dir / "pairing_summary.json"
     deviation_json_path = output_dir / "deviation_table.json"
     deviation_csv_path = output_dir / "deviation_table.csv"
+    propagation_path = output_dir / "propagation.json"
+    diagnosis_path = output_dir / "diagnosis.json"
+    fingerprint_path = output_dir / "fingerprint.json"
     assert paired_path.is_file()
     assert summary_path.is_file()
     assert deviation_json_path.is_file()
     assert deviation_csv_path.is_file()
+    assert propagation_path.is_file()
+    assert diagnosis_path.is_file()
+    assert fingerprint_path.is_file()
 
     paired_frames = json.loads(paired_path.read_text(encoding="utf-8"))
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     deviation_rows = json.loads(deviation_json_path.read_text(encoding="utf-8"))
+    propagation = json.loads(propagation_path.read_text(encoding="utf-8"))
+    diagnosis = json.loads(diagnosis_path.read_text(encoding="utf-8"))
+    fingerprint = json.loads(fingerprint_path.read_text(encoding="utf-8"))
 
     assert len(paired_frames) == 30
     assert summary["paired_count"] == 30
@@ -64,3 +73,14 @@ def test_cli_analyze_sample_data(tmp_path: Path) -> None:
         "details",
     }
     assert len(deviation_csv_path.read_text(encoding="utf-8").splitlines()) == (30 * 5) + 1
+    assert "reasoning" in propagation["collapse_onsets"]
+    assert diagnosis["primary_failure_stage"] == "reasoning"
+    assert diagnosis["driving_failure"] is True
+    assert diagnosis["deviation_precedes_driving_failure"] is True
+    assert set(fingerprint["stage_scores"]) == {
+        "vision",
+        "semantic",
+        "reasoning",
+        "planning",
+        "control",
+    }

@@ -9,7 +9,10 @@ from typing import Sequence
 
 from sd2 import __version__
 from sd2.adapters.jsonl_adapter import load_run_jsonl
+from sd2.analysis.diagnosis import compute_failure_diagnosis
 from sd2.analysis.deviation import compute_deviation_table
+from sd2.analysis.fingerprint import compute_robustness_fingerprint
+from sd2.analysis.propagation import compute_propagation_analysis
 from sd2.core.config import load_config
 from sd2.core.run import pair_runs
 
@@ -48,6 +51,14 @@ def _run_analyze(args: argparse.Namespace) -> int:
     stress = load_run_jsonl(args.stress)
     paired_run = pair_runs(clean, stress)
     deviation_table = compute_deviation_table(paired_run, config)
+    propagation_result = compute_propagation_analysis(deviation_table, config)
+    diagnosis_result = compute_failure_diagnosis(
+        deviation_table,
+        propagation_result,
+        paired_run,
+        config,
+    )
+    fingerprint = compute_robustness_fingerprint(deviation_table, config)
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -68,6 +79,9 @@ def _run_analyze(args: argparse.Namespace) -> int:
     )
     deviation_table.write_json(output_dir / "deviation_table.json")
     deviation_table.write_csv(output_dir / "deviation_table.csv")
+    propagation_result.write_json(output_dir / "propagation.json")
+    diagnosis_result.write_json(output_dir / "diagnosis.json")
+    fingerprint.write_json(output_dir / "fingerprint.json")
 
     return 0
 

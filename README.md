@@ -1,6 +1,6 @@
 # SD2
 
-SD2 (System Deviation Diagnosis) is an offline analysis framework for studying how stress conditions affect functional stages in vision-language autonomous driving systems. The MVP starts with stored clean and stress run logs, validates them against a shared schema, pairs matching frames, and writes stage-wise deviation artifacts.
+SD2 (System Deviation Diagnosis) is an offline analysis framework for studying how stress conditions affect functional stages in vision-language autonomous driving systems. The MVP starts with stored clean and stress run logs, validates them against a shared schema, pairs matching frames, and writes stage-wise deviation, propagation, diagnosis, and fingerprint artifacts.
 
 ## Quickstart
 
@@ -37,7 +37,7 @@ conda run -n sd2 python -m pytest -q
 
 ## Current Status
 
-Phase 1 through Phase 4 are complete for the MVP:
+Phase 1 through Phase 6 are complete for the MVP:
 
 - src-layout Python package scaffold
 - Pydantic v2 run and frame schema
@@ -46,9 +46,20 @@ Phase 1 through Phase 4 are complete for the MVP:
 - clean/stress frame pairing with skipped-frame summary
 - stage-wise metric registry and MVP metrics for vision, semantic, reasoning, planning, and control stages
 - min-max clipping and threshold status classification (`healthy`, `warning`, `critical`)
-- `sd2 analyze` CLI that writes `paired_frames.json`, `pairing_summary.json`, `deviation_table.json`, and `deviation_table.csv`
+- propagation analysis with adjacent-stage scores, warning/critical collapse onsets, and downstream-increase evidence
+- failure diagnosis using `first_critical_with_downstream_increase`, with fallbacks to earliest warning with downstream increase, highest mean-deviation stage, then `no_failure_detected`
+- per-run robustness fingerprint where each observed stage score is `1 - mean(normalized deviation)`
+- `sd2 analyze` CLI that writes `paired_frames.json`, `pairing_summary.json`, `deviation_table.json`, `deviation_table.csv`, `propagation.json`, `diagnosis.json`, and `fingerprint.json`
 
-Outcome-stage metrics, CARLA integration, model-specific adapters, propagation analysis, diagnosis, plots, and reports are reserved for later phases.
+Outcome-stage metrics, CARLA integration, model-specific adapters, plots, and reports are reserved for later phases.
+
+## Analysis Outputs
+
+`propagation.json` contains per-frame and aggregate adjacent-stage propagation scores, per-stage collapse onsets for warning and critical thresholds, and before/after downstream-increase evidence.
+
+`diagnosis.json` identifies the primary failure stage, records the policy and fallback used, compares clean versus stress outcomes, reports whether a driving failure occurred, and includes human-readable evidence for the decision.
+
+`fingerprint.json` reports stage robustness scores from 0 to 1, with missing stages written as `null` rather than zero.
 
 ## Metric Config
 

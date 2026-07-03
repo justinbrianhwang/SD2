@@ -47,5 +47,9 @@ metrics:
 
 diagnosis:
   primary_failure_policy: "first_critical_with_downstream_increase"
+  propagation_lag: 0
   downstream_window: 5
+  downstream_min_delta: 0.0
   epsilon: 1.0e-6
+  noise_floor: 0.05
+  route_progress_drop_threshold: 0.05
