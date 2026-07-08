@@ -11,7 +11,9 @@
 
 ## Summary Diagnosis
 
-Under Gaussian Noise severity 3, the openemma model completed 92.0% of the route and experienced a collision and a lane invasion. The first critical deviation occurred in the Reasoning stage at t=1.500s (frame 15). Propagation evidence shows downstream increases in the order Planning (+0.080) and Control (+0.088) after the Reasoning onset. The primary failure stage is diagnosed as Reasoning. This suggests that upstream perception remained comparatively stable, but semantic or intent changes were amplified during reasoning and propagated into planning and control.
+Under Gaussian Noise severity 3, the openemma model completed 92.0% of the route and experienced a collision and a lane invasion. The Reasoning stage showed the earliest critical deviation at t=1.500s (frame 15), preceding downstream Planning and Control deviation and the final driving failure. Downstream deviation increases followed the Reasoning onset in the order Planning (+0.080) and Control (+0.088). The primary_failure_stage label is Reasoning. Upstream perception did not show an earlier critical deviation; reasoning-stage deviation was followed by planning/control deviation.
+
+Diagnosis type: temporal-correlational; this report identifies the earliest-collapsing stage by timing, not mechanistic proof.
 
 ## Final Outcome Comparison
 
@@ -43,12 +45,12 @@ Under Gaussian Noise severity 3, the openemma model completed 92.0% of the route
 
 ## Propagation Summary
 
-| Edge | Aggregate Score | Lag |
-| --- | --- | --- |
-| Vision -> Semantic | n/a | 0 |
-| Semantic -> Reasoning | 3.800 | 0 |
-| Reasoning -> Planning | 0.170 | 0 |
-| Planning -> Control | 1.349 | 0 |
+| Edge | Legacy Ratio | Clipped Ratio | Log Ratio | Absolute Increase | Persistence | Lag |
+| --- | --- | --- | --- | --- | --- | --- |
+| Vision -> Semantic | n/a | n/a | n/a | n/a | n/a | 0 |
+| Semantic -> Reasoning | 3.800 | 3.800 | 1.335 | n/a | n/a | 0 |
+| Reasoning -> Planning | 0.170 | 0.170 | -1.993 | -0.783 | 0.000 | 0 |
+| Planning -> Control | 1.349 | 1.349 | 0.249 | n/a | n/a | 0 |
 
 ## Robustness Fingerprint
 

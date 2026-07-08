@@ -11,6 +11,11 @@ from typing import Any
 import pandas as pd
 
 import sd2.metrics  # noqa: F401 - imported to register concrete metrics
+from sd2.analysis.thresholds import (
+    ThresholdSet,
+    classify_with_thresholds,
+    threshold_set_from_mapping,
+)
 from sd2.core.config import SD2Config
 from sd2.core.run import PairedRun
 from sd2.core.stage import Stage
@@ -89,10 +94,19 @@ class DeviationTable:
         self.to_dataframe().to_csv(path, index=False)
 
 
-def compute_deviation_table(paired_run: PairedRun, config: SD2Config) -> DeviationTable:
+def compute_deviation_table(
+    paired_run: PairedRun,
+    config: SD2Config,
+    thresholds: ThresholdSet | dict[str, Any] | None = None,
+) -> DeviationTable:
     """Compute deviations for every paired frame and configured non-outcome stage."""
 
     metrics = _build_stage_metrics(config)
+    threshold_set = (
+        threshold_set_from_mapping(config.thresholds, source="config")
+        if thresholds is None
+        else _ensure_threshold_set(thresholds)
+    )
     records: list[DeviationRecord] = []
     for paired_frame in paired_run.pairs:
         for stage, metric in metrics:
@@ -105,7 +119,8 @@ def compute_deviation_table(paired_run: PairedRun, config: SD2Config) -> Deviati
             )
             status = MISSING if result.missing else classify_status(
                 normalized_score,
-                config.thresholds,
+                threshold_set,
+                stage=stage,
             )
             records.append(
                 DeviationRecord(
@@ -124,16 +139,24 @@ def compute_deviation_table(paired_run: PairedRun, config: SD2Config) -> Deviati
     return DeviationTable(records=records)
 
 
-def classify_status(score: float, thresholds: dict[str, Any]) -> str:
+def classify_status(
+    score: float,
+    thresholds: dict[str, Any] | ThresholdSet,
+    stage: Stage | str | None = None,
+) -> str:
     """Classify a normalized deviation score using warning/critical thresholds."""
 
-    warning = float(thresholds.get("warning", 0.4))
-    critical = float(thresholds.get("critical", 0.7))
-    if score >= critical:
-        return CRITICAL
-    if score >= warning:
-        return WARNING
-    return HEALTHY
+    return classify_with_thresholds(
+        float(score),
+        _ensure_threshold_set(thresholds),
+        stage=stage,
+    )
+
+
+def _ensure_threshold_set(thresholds: dict[str, Any] | ThresholdSet) -> ThresholdSet:
+    if isinstance(thresholds, ThresholdSet):
+        return thresholds
+    return threshold_set_from_mapping(thresholds)
 
 
 def _build_stage_metrics(config: SD2Config) -> list[tuple[Stage, StageMetric]]:

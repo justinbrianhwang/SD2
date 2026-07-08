@@ -52,4 +52,5 @@ diagnosis:
   downstream_min_delta: 0.0
   epsilon: 1.0e-6
   noise_floor: 0.05
+  propagation_ratio_cap: 10.0
   route_progress_drop_threshold: 0.05

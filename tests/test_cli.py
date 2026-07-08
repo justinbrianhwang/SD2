@@ -74,6 +74,9 @@ def test_cli_analyze_sample_data(tmp_path: Path) -> None:
     }
     assert len(deviation_csv_path.read_text(encoding="utf-8").splitlines()) == (30 * 5) + 1
     assert "reasoning" in propagation["collapse_onsets"]
+    assert "ratio_clipped" in propagation["propagation_scores"][0]
+    assert "collapse_order" in propagation["propagation_scores"][0]
+    assert diagnosis["diagnosis_type"] == "temporal_correlational"
     assert diagnosis["primary_failure_stage"] == "reasoning"
     assert diagnosis["driving_failure"] is True
     assert diagnosis["deviation_precedes_driving_failure"] is True

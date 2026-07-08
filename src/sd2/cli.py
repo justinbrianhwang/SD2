@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import sys
 from pathlib import Path
 from typing import Sequence
 
 from sd2 import __version__
+from sd2.analysis.calibration import (
+    calibrate_thresholds,
+    format_calibrated_threshold_table,
+)
 from sd2.analysis.pipeline import run_analysis
 from sd2.benchmark.report import generate_benchmark_report, headline_accuracy
 from sd2.benchmark.runner import run_fault_benchmark
+from sd2.core.config import load_config
 from sd2.reports.markdown import generate_fingerprint_summary, generate_report
 from sd2.stressors.pipeline import run_stress
 
@@ -29,9 +35,48 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--config", required=True, help="path to YAML config")
     analyze.add_argument("--output", required=True, help="output directory")
     analyze.add_argument(
+        "--thresholds",
+        help="optional calibrated_thresholds.json for per-stage status thresholds",
+    )
+    analyze.add_argument(
         "--report",
         action="store_true",
         help="generate report.md and plots after analysis",
+    )
+
+    calibrate = subparsers.add_parser(
+        "calibrate",
+        help="calibrate warning/critical thresholds from repeated clean runs",
+    )
+    calibrate.add_argument(
+        "--clean",
+        action="append",
+        default=[],
+        help="path to a clean run JSONL; repeat for two or more runs",
+    )
+    calibrate.add_argument(
+        "--clean-glob",
+        action="append",
+        default=[],
+        help="glob pattern for clean run JSONL files",
+    )
+    calibrate.add_argument("--config", required=True, help="path to YAML config")
+    calibrate.add_argument(
+        "--output",
+        required=True,
+        help="output file or directory for calibrated_thresholds.json",
+    )
+    calibrate.add_argument(
+        "--k-warning",
+        type=float,
+        default=2.0,
+        help="warning threshold multiplier, default: 2.0",
+    )
+    calibrate.add_argument(
+        "--k-critical",
+        type=float,
+        default=3.0,
+        help="critical threshold multiplier, default: 3.0",
     )
 
     report = subparsers.add_parser("report", help="generate a Markdown report")
@@ -92,6 +137,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "analyze":
         return _run_analyze(args)
+    if args.command == "calibrate":
+        return _run_calibrate(args)
     if args.command == "report":
         return _run_report(args)
     if args.command == "fingerprint":
@@ -112,7 +159,29 @@ def _run_analyze(args: argparse.Namespace) -> int:
         config_path=args.config,
         output_dir=args.output,
         report=bool(args.report),
+        thresholds_path=args.thresholds,
     )
+    return 0
+
+
+def _run_calibrate(args: argparse.Namespace) -> int:
+    try:
+        clean_paths = _resolve_clean_paths(args.clean, args.clean_glob)
+        config = load_config(args.config)
+        result = calibrate_thresholds(
+            clean_paths,
+            config,
+            k_warning=args.k_warning,
+            k_critical=args.k_critical,
+        )
+        output = _calibration_output_path(args.output)
+        result.write_json(output)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(format_calibrated_threshold_table(result))
+    print(f"Wrote {output}")
     return 0
 
 
@@ -168,6 +237,31 @@ def _run_benchmark(args: argparse.Namespace) -> int:
 
     print(headline_accuracy(result))
     return 0
+
+
+def _resolve_clean_paths(
+    explicit_paths: list[str],
+    patterns: list[str],
+) -> list[Path]:
+    paths = [Path(path) for path in explicit_paths]
+    for pattern in patterns:
+        paths.extend(Path(match) for match in glob.glob(pattern))
+    unique = sorted({path.resolve() for path in paths})
+    if len(unique) < 2:
+        raise ValueError("calibration requires at least two --clean paths")
+    missing = [path for path in unique if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"clean run not found: {missing[0]}")
+    return unique
+
+
+def _calibration_output_path(raw_output: str) -> Path:
+    output = Path(raw_output)
+    if output.suffix.lower() == ".json":
+        output.parent.mkdir(parents=True, exist_ok=True)
+        return output
+    output.mkdir(parents=True, exist_ok=True)
+    return output / "calibrated_thresholds.json"
 
 
 if __name__ == "__main__":

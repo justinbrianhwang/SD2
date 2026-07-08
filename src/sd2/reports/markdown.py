@@ -139,6 +139,11 @@ def render_report_markdown(
         "",
         build_summary_diagnosis(artifacts),
         "",
+        (
+            "Diagnosis type: temporal-correlational; this report identifies the "
+            "earliest-collapsing stage by timing, not mechanistic proof."
+        ),
+        "",
         "## Final Outcome Comparison",
         "",
         _final_outcome_table(artifacts.diagnosis),
@@ -221,10 +226,23 @@ def build_summary_diagnosis(artifacts: AnalysisArtifacts) -> str:
         )
     else:
         stage, point = first_critical
+        downstream_phrase = _downstream_deviation_phrase(
+            stage,
+            point,
+            collapse_times,
+            artifacts.propagation,
+            "critical",
+        )
+        failure_phrase = (
+            "the final driving failure"
+            if diagnosis.get("driving_failure") is True
+            else "no final driving failure"
+        )
         first_sentence = (
-            "The first critical deviation occurred in the "
-            f"{_display_stage(stage)} stage at t={_format_time(point.get('timestamp'))} "
-            f"(frame {_format_value(point.get('frame_idx'))})."
+            f"The {_display_stage(stage)} stage showed the earliest critical "
+            f"deviation at t={_format_time(point.get('timestamp'))} "
+            f"(frame {_format_value(point.get('frame_idx'))}), preceding "
+            f"{downstream_phrase} and {failure_phrase}."
         )
         propagation_sentence = _propagation_order_sentence(
             stage,
@@ -237,7 +255,7 @@ def build_summary_diagnosis(artifacts: AnalysisArtifacts) -> str:
     primary = diagnosis.get("primary_failure_stage")
     if primary:
         primary_sentence = (
-            "The primary failure stage is diagnosed as "
+            "The primary_failure_stage label is "
             f"{_display_stage(str(primary))}."
         )
     else:
@@ -387,7 +405,7 @@ def _stage_mean_table(
                 _display_stage(stage),
                 _format_optional_float(mean_score),
                 _format_optional_float(stage_max.get(stage)),
-                _status_from_score(mean_score, thresholds),
+                _status_from_score(mean_score, thresholds, stage),
                 str(stage_counts.get(stage, 0)),
             )
         )
@@ -425,10 +443,25 @@ def _propagation_table(propagation: dict[str, Any]) -> str:
                 (
                     edge,
                     _format_optional_float(item.get("aggregate_score")),
+                    _format_optional_float(item.get("ratio_clipped")),
+                    _format_optional_float(item.get("log_ratio")),
+                    _format_optional_float(item.get("absolute_increase")),
+                    _format_optional_float(item.get("downstream_persistence")),
                     str(item.get("lag", propagation.get("lag", "n/a"))),
                 )
             )
-    return _simple_table(["Edge", "Aggregate Score", "Lag"], rows)
+    return _simple_table(
+        [
+            "Edge",
+            "Legacy Ratio",
+            "Clipped Ratio",
+            "Log Ratio",
+            "Absolute Increase",
+            "Persistence",
+            "Lag",
+        ],
+        rows,
+    )
 
 
 def _fingerprint_table(fingerprint: dict[str, Any]) -> str:
@@ -563,7 +596,61 @@ def _propagation_order_sentence(
         f"{_display_stage(stage)} {status} at t={_format_time(point.get('timestamp'))}"
         for _, stage, point, status in downstream
     ]
-    return "Propagation was observed downstream in the order " + _join_words(parts) + "."
+    return "Downstream warning/critical deviations followed in the order " + _join_words(parts) + "."
+
+
+def _downstream_deviation_phrase(
+    first_stage: str,
+    first_point: dict[str, Any],
+    collapse_times: dict[str, Any],
+    propagation: dict[str, Any] | None = None,
+    onset_status: str | None = None,
+) -> str:
+    downstream_names = _downstream_increase_stage_names(
+        first_stage,
+        propagation,
+        onset_status,
+    )
+    if downstream_names:
+        return f"downstream {_join_words(downstream_names)} deviation"
+
+    first_time = _coerce_float(first_point.get("timestamp"))
+    first_index = _stage_index(first_stage)
+    downstream = []
+    for stage, points in _ordered_stage_items(collapse_times):
+        if _stage_index(stage) <= first_index:
+            continue
+        point, _ = _best_onset_after(points, first_time)
+        if point is not None:
+            downstream.append(_display_stage(stage))
+    if not downstream:
+        return "no downstream warning/critical deviation"
+    return f"downstream {_join_words(downstream)} deviation"
+
+
+def _downstream_increase_stage_names(
+    source_stage: str,
+    propagation: dict[str, Any] | None,
+    onset_status: str | None,
+) -> list[str]:
+    payload = _dict(propagation)
+    raw_increases = payload.get("downstream_increases", [])
+    if not isinstance(raw_increases, list):
+        return []
+    stages = []
+    for item in raw_increases:
+        if not isinstance(item, dict):
+            continue
+        if item.get("source_stage") != source_stage:
+            continue
+        if onset_status is not None and item.get("onset_status") != onset_status:
+            continue
+        if item.get("increased") is not True:
+            continue
+        downstream = str(item.get("downstream_stage", ""))
+        if downstream:
+            stages.append((_stage_index(downstream), _display_stage(downstream)))
+    return [stage for _, stage in sorted(set(stages), key=lambda item: item[0])]
 
 
 def _propagation_from_primary(
@@ -620,8 +707,8 @@ def _downstream_increase_sentence(
         for _, stage, delta in increases
     ]
     return (
-        "Propagation evidence shows downstream increases in the order "
-        f"{_join_words(parts)} after the {_display_stage(source_stage)} onset."
+        "Downstream deviation increases followed the "
+        f"{_display_stage(source_stage)} onset in the order {_join_words(parts)}."
     )
 
 
@@ -631,7 +718,7 @@ def _interpretation_sentence(
     stage_means: dict[str, float],
 ) -> str:
     if primary is None:
-        return "This suggests that the configured thresholds did not identify a pipeline collapse."
+        return "The configured thresholds did not identify a pipeline collapse."
 
     downstream = [
         stage
@@ -647,20 +734,19 @@ def _interpretation_sentence(
     ]
     if primary == Stage.REASONING.value and not upstream_critical:
         return (
-            "This suggests that upstream perception remained comparatively stable, "
-            "but semantic or intent changes were amplified during reasoning and "
-            "propagated into planning and control."
+            "Upstream perception did not show an earlier critical deviation; "
+            "reasoning-stage deviation was followed by planning/control deviation."
         )
     if downstream:
         return (
-            f"This suggests that the stress became operationally important at "
-            f"{_display_stage(primary)} and then propagated into "
+            f"Downstream warning deviations followed {_display_stage(primary)} in "
             f"{_join_words([_display_stage(stage) for stage in downstream])}."
         )
     mean_score = stage_means.get(primary)
     return (
-        f"This suggests that {_display_stage(primary)} dominated the observed "
-        f"deviation profile with mean deviation {_format_optional_float(mean_score)}."
+        f"{_display_stage(primary)} had the highest observed mean deviation "
+        f"({_format_optional_float(mean_score)}) among stages considered by "
+        "the fallback policy."
     )
 
 
@@ -755,16 +841,33 @@ def _scores_by_stage(rows: list[dict[str, Any]]) -> dict[str, list[float]]:
     return scores
 
 
-def _status_from_score(score: float | None, thresholds: dict[str, Any]) -> str:
+def _status_from_score(
+    score: float | None,
+    thresholds: dict[str, Any],
+    stage: str | None = None,
+) -> str:
     if score is None:
         return "missing"
-    warning = _coerce_float(thresholds.get("warning")) or 0.4
-    critical = _coerce_float(thresholds.get("critical")) or 0.7
+    warning, critical = _threshold_values_for_stage(thresholds, stage)
     if score >= critical:
         return "critical"
     if score >= warning:
         return "warning"
     return "healthy"
+
+
+def _threshold_values_for_stage(
+    thresholds: dict[str, Any],
+    stage: str | None,
+) -> tuple[float, float]:
+    warning = _coerce_float(thresholds.get("warning")) or 0.4
+    critical = _coerce_float(thresholds.get("critical")) or 0.7
+    per_stage = thresholds.get("per_stage") or thresholds.get("stages")
+    if stage is not None and isinstance(per_stage, dict):
+        stage_thresholds = _dict(per_stage.get(stage))
+        warning = _coerce_float(stage_thresholds.get("warning")) or warning
+        critical = _coerce_float(stage_thresholds.get("critical")) or critical
+    return warning, critical
 
 
 def _ordered_stage_items(data: dict[str, Any]) -> list[tuple[str, Any]]:

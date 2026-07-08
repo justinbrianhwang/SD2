@@ -56,6 +56,16 @@ class SyntheticPairPaths:
     label_path: Path
 
 
+@dataclass(frozen=True)
+class SyntheticCleanRun:
+    """One repeated clean synthetic run for calibration demos/tests."""
+
+    run_id: str
+    run_seed: int
+    metadata: dict[str, Any]
+    frames: list[dict[str, Any]]
+
+
 def generate_synthetic_pairs(
     n_per_class: int = 20,
     seed: int = 42,
@@ -119,6 +129,74 @@ def materialize_pair(pair: SyntheticRunPair, output_dir: str | Path) -> Syntheti
         stress_path=stress_path,
         label_path=label_path,
     )
+
+
+def generate_repeated_clean_runs(
+    count: int = 4,
+    seed: int = 42,
+    frame_count: int = 30,
+) -> list[SyntheticCleanRun]:
+    """Generate repeated clean JSONL-compatible runs with different RNG seeds."""
+
+    if count < 2:
+        raise ValueError("count must be at least 2")
+    if frame_count < 2:
+        raise ValueError("frame_count must be at least 2")
+
+    master_rng = random.Random(seed)
+    runs: list[SyntheticCleanRun] = []
+    for index in range(count):
+        run_seed = master_rng.randrange(1, 2_147_483_647)
+        rng = random.Random(run_seed)
+        route_phase = rng.uniform(-0.6, 0.6)
+        curve_amplitude = rng.uniform(0.22, 0.46)
+        run_id = f"synthetic_clean_repeat_{index:03d}_seed{run_seed}"
+        metadata = {
+            "run_id": run_id,
+            "condition": "clean",
+            "stress_type": None,
+            "severity": 0,
+            "model_id": "synthetic_sd2",
+            "scenario_id": "calibration_clean_repeat",
+            "seed": run_seed,
+            "timestamp_start": "2026-01-01T00:00:00",
+        }
+        frames = [
+            _base_clean_frame(
+                run_id=run_id,
+                frame_idx=frame_idx,
+                frame_count=frame_count,
+                rng=rng,
+                route_phase=route_phase,
+                curve_amplitude=curve_amplitude,
+            )
+            for frame_idx in range(frame_count)
+        ]
+        runs.append(
+            SyntheticCleanRun(
+                run_id=run_id,
+                run_seed=run_seed,
+                metadata=metadata,
+                frames=frames,
+            )
+        )
+    return runs
+
+
+def materialize_clean_runs(
+    runs: list[SyntheticCleanRun],
+    output_dir: str | Path,
+) -> list[Path]:
+    """Write repeated clean runs and return their JSONL paths."""
+
+    root = Path(output_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+    for run in runs:
+        path = root / f"{run.run_id}.jsonl"
+        _write_run(path, run.metadata, run.frames)
+        paths.append(path)
+    return paths
 
 
 def _build_pair(

@@ -1,4 +1,4 @@
-"""Failure diagnosis from deviation propagation and driving outcomes.
+"""Temporal-correlational failure diagnosis from deviations and outcomes.
 
 The MVP policy, ``first_critical_with_downstream_increase``, selects the
 earliest stage whose critical onset is followed by an increase in any available
@@ -34,12 +34,14 @@ from sd2.core.stage import Stage
 
 
 SUPPORTED_POLICY = "first_critical_with_downstream_increase"
+DIAGNOSIS_TYPE = "temporal_correlational"
 
 
 @dataclass(frozen=True)
 class DiagnosisResult:
     """Complete failure diagnosis output."""
 
+    diagnosis_type: str
     primary_failure_stage: Stage | None
     status: str
     policy_used: str
@@ -57,6 +59,7 @@ class DiagnosisResult:
         """Return a JSON-serializable diagnosis result."""
 
         return {
+            "diagnosis_type": self.diagnosis_type,
             "primary_failure_stage": None
             if self.primary_failure_stage is None
             else self.primary_failure_stage.value,
@@ -137,6 +140,7 @@ def compute_failure_diagnosis(
     )
 
     return DiagnosisResult(
+        diagnosis_type=DIAGNOSIS_TYPE,
         primary_failure_stage=selection.stage,
         status=selection.status,
         policy_used=policy,
@@ -277,6 +281,11 @@ def _compact_propagation_scores(
             "upstream_stage": score.upstream_stage.value,
             "downstream_stage": score.downstream_stage.value,
             "aggregate_score": score.aggregate_score,
+            "ratio_clipped": score.ratio_clipped,
+            "log_ratio": score.log_ratio,
+            "absolute_increase": score.absolute_increase,
+            "collapse_order": score.collapse_order.to_dict(),
+            "downstream_persistence": score.downstream_persistence,
         }
         for score in propagation_result.propagation_scores
     ]
@@ -440,9 +449,14 @@ def _build_evidence(
             "deviations remained healthy."
         )
     elif selection.onset is not None and selection.onset_status is not None:
+        status_text = (
+            "earliest critical deviation"
+            if selection.onset_status == "critical"
+            else "earliest warning deviation"
+        )
         evidence.append(
-            f"{_display_stage(selection.stage)} deviation first exceeded "
-            f"{selection.onset_status} threshold at "
+            f"{_display_stage(selection.stage)} showed the {status_text} "
+            "with temporal downstream support at "
             f"t={_format_time(selection.onset.timestamp)} "
             f"(frame {selection.onset.frame_idx})."
         )
@@ -463,16 +477,17 @@ def _build_evidence(
         ]
         for item in downstream_evidence:
             evidence.append(_downstream_evidence_text(item))
+        evidence.extend(_adjacent_bundle_evidence_texts(propagation_result, selection.stage))
         if not downstream_evidence and selection.fallback_used is not None:
             evidence.append(
-                "No downstream stage had a confirmed before/after increase for "
-                "the primary onset."
+                "No downstream stage had a confirmed temporal before/after "
+                "increase for the primary onset."
             )
 
     if selection.fallback_used == "highest_mean_deviation_stage":
         mean_score = stage_means.get(selection.stage) if selection.stage else None
         evidence.append(
-            "No critical or warning stage had downstream-increase support; "
+            "No critical or warning stage had downstream temporal support; "
             "selected the highest mean-deviation stage "
             f"({_display_stage(selection.stage)} at "
             f"{_format_optional_score(mean_score)})."
@@ -491,13 +506,13 @@ def _build_evidence(
         )
         if deviation_precedes:
             evidence.append(
-                f"{_display_stage(selection.stage)} collapse preceded the first "
-                f"driving failure by {delta:.3f}s."
+                f"{_display_stage(selection.stage)} {selection.onset_status} "
+                f"deviation preceded the first driving failure by {delta:.3f}s."
             )
         else:
             evidence.append(
-                f"{_display_stage(selection.stage)} collapse did not precede the "
-                "first driving failure."
+                f"{_display_stage(selection.stage)} {selection.onset_status} "
+                "deviation did not precede the first driving failure."
             )
     elif driving_analysis.driving_failure_time is None:
         evidence.append("No driving failure timestamp was available for temporal ordering.")
@@ -507,11 +522,32 @@ def _build_evidence(
 
 def _downstream_evidence_text(item: DownstreamIncreaseEvidence) -> str:
     return (
-        f"{_display_stage(item.downstream_stage)} deviation increased after "
+        f"{_display_stage(item.downstream_stage)} deviation was higher after "
         f"{_display_stage(item.source_stage)} {item.onset_status} onset "
         f"(before mean {_format_optional_score(item.before_mean)}, "
         f"after mean {_format_optional_score(item.after_mean)})."
     )
+
+
+def _adjacent_bundle_evidence_texts(
+    propagation_result: PropagationResult,
+    source_stage: Stage,
+) -> list[str]:
+    texts: list[str] = []
+    for score in propagation_result.propagation_scores:
+        if score.upstream_stage != source_stage:
+            continue
+        order = score.collapse_order
+        if order.downstream_after_upstream is not True:
+            continue
+        texts.append(
+            f"{_display_stage(score.downstream_stage)} onset followed "
+            f"{_display_stage(score.upstream_stage)} onset; mean absolute "
+            f"downstream-minus-upstream deviation was "
+            f"{_format_optional_score(score.absolute_increase)} and downstream "
+            f"persistence was {_format_optional_score(score.downstream_persistence)}."
+        )
+    return texts
 
 
 def _display_stage(stage: Stage | None) -> str:

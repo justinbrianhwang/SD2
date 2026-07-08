@@ -1,8 +1,10 @@
 # SD2
 
-SD2 (System Deviation Diagnosis) is an offline analysis framework for studying how stress conditions affect functional stages in vision-language autonomous driving systems. The MVP reads stored clean and stress run logs, pairs matching frames, computes stage-wise deviation and propagation, diagnoses the likely failure stage, and generates a Markdown report with plots.
+SD2 (System Deviation Diagnosis) is an offline analysis framework for studying how stress conditions affect functional stages in vision-language autonomous driving systems. The MVP reads stored clean and stress run logs, pairs matching frames, computes stage-wise deviation and downstream temporal evidence, labels the primary failure stage, and generates a Markdown report with plots.
 
 Instead of asking *"how well does this model drive?"*, SD2 asks *"where in the pipeline does robustness collapse, and how does the error propagate?"*
+
+Diagnosis outputs are **temporal-correlational**. They identify the earliest stage whose deviation crosses configured thresholds and is temporally followed by downstream deviation and/or driving failure evidence. They do not prove a mechanistic root explanation.
 
 ## Example Output
 
@@ -10,13 +12,15 @@ Running the bundled demo on the sample logs (Gaussian noise, severity 3) produce
 
 ![Robustness fingerprint](docs/example/robustness_fingerprint.png)
 
-The **deviation timeline** shows where robustness collapses first: vision stays stable while reasoning crosses the critical threshold at t=1.5s, then planning and control drift follows:
+The **deviation timeline** shows where robustness collapses first: vision stays stable while reasoning crosses the critical threshold at t=1.5s, followed by planning and control drift:
 
 ![Stage-wise deviation timeline](docs/example/deviation_timeline.png)
 
 From this, the diagnosis module generates a natural-language summary:
 
-> Under Gaussian Noise severity 3, the openemma model completed 92.0% of the route and experienced a collision and a lane invasion. The first critical deviation occurred in the Reasoning stage at t=1.500s (frame 15). ... The primary failure stage is diagnosed as Reasoning. This suggests that upstream perception remained comparatively stable, but semantic or intent changes were amplified during reasoning and propagated into planning and control.
+> Under Gaussian Noise severity 3, the openemma model completed 92.0% of the route and experienced a collision and a lane invasion. The Reasoning stage showed the earliest critical deviation at t=1.500s (frame 15), preceding downstream Planning/Control deviation and the final driving failure. The primary_failure_stage label is Reasoning.
+
+`diagnosis.json` includes `"diagnosis_type": "temporal_correlational"` to make this framing explicit.
 
 See the full generated report at [docs/example/example_report.md](docs/example/example_report.md).
 
@@ -84,6 +88,18 @@ Or run analysis and report generation directly:
 python -m sd2.cli analyze --clean data/sample/clean_run.jsonl --stress data/sample/stress_run.jsonl --config configs/mvp.yaml --output outputs/sample_analysis --report
 ```
 
+Calibrate warning/critical thresholds from repeated clean runs:
+
+```powershell
+python -m sd2.cli calibrate --clean clean_a.jsonl --clean clean_b.jsonl --clean clean_c.jsonl --config configs/mvp.yaml --output outputs/calibration
+```
+
+Consume calibrated per-stage thresholds during analysis:
+
+```powershell
+python -m sd2.cli analyze --clean data/sample/clean_run.jsonl --stress data/sample/stress_run.jsonl --config configs/mvp.yaml --thresholds outputs/calibration/calibrated_thresholds.json --output outputs/sample_analysis_calibrated --report
+```
+
 Generate a report from an existing analysis directory:
 
 ```powershell
@@ -131,6 +147,8 @@ The demo writes:
 - `outputs/sample_analysis/plots/robustness_fingerprint.png`
 - `outputs/sample_analysis/plots/propagation_scores.png`
 
+Calibration writes `calibrated_thresholds.json`, containing per-stage clean-clean mean/std, warning/critical thresholds computed as `mean + k * std`, and fallback flags for stages whose clean-clean variance is near zero.
+
 A copy of the demo output (report and plots) is kept under [docs/example/](docs/example/) for reference.
 
 ## Stressors
@@ -174,8 +192,9 @@ MVP Phase 1 through the offline stressor layer are complete:
 - stage-wise metric registry and MVP metrics for vision, semantic, reasoning, planning, and control stages
 - visual and temporal stressor registry with `sd2 stress` CLI materialization
 - min-max clipping and threshold status classification (`healthy`, `warning`, `critical`)
-- propagation analysis with adjacent-stage scores, warning/critical collapse onsets, and downstream-increase evidence
-- failure diagnosis using `first_critical_with_downstream_increase`, with documented fallbacks
+- optional clean-clean threshold calibration with `sd2 calibrate` and `sd2 analyze --thresholds`
+- propagation analysis with adjacent-stage robust evidence bundles: legacy ratio, clipped ratio, log-ratio, absolute increase, collapse order, and downstream persistence
+- temporal-correlational failure-stage labeling using `first_critical_with_downstream_increase`, with documented fallbacks
 - per-run robustness fingerprint where each observed stage score is `1 - mean(normalized deviation)`
 - Markdown report generation with stage timeline, fingerprint, and propagation plots
 - `sd2 analyze --report`, `sd2 report`, and `sd2 fingerprint` CLI flows

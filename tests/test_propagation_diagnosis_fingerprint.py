@@ -1,3 +1,5 @@
+from math import isfinite, log
+
 import pytest
 
 from sd2.analysis.diagnosis import compute_failure_diagnosis
@@ -33,12 +35,15 @@ def test_reasoning_first_collapse_propagates_to_planning_and_control() -> None:
     )
 
     assert diagnosis.primary_failure_stage == Stage.REASONING
+    assert diagnosis.diagnosis_type == "temporal_correlational"
     assert diagnosis.driving_failure is True
     assert diagnosis.deviation_precedes_driving_failure is True
     assert any(
-        "Reasoning deviation first exceeded critical threshold" in item
+        "Reasoning showed the earliest critical deviation" in item
         for item in diagnosis.evidence
     )
+    assert any("preceded the first driving failure" in item for item in diagnosis.evidence)
+    assert "caused" not in " ".join(diagnosis.evidence).lower()
 
 
 def test_all_healthy_run_has_no_failure_detected() -> None:
@@ -107,10 +112,53 @@ def test_collapse_onset_and_propagation_score_numeric_correctness() -> None:
         [1.0, 2.0, 3.0]
     )
     assert score.aggregate_score == pytest.approx(1.5)
+    assert score.ratio_clipped == pytest.approx(1.5)
+    assert score.log_ratio == pytest.approx((log(0.3 / 0.2) + log(0.7 / 0.3)) / 2)
     assert semantic_onset.warning is not None
     assert semantic_onset.warning.frame_idx == 1
     assert semantic_onset.warning.timestamp == pytest.approx(0.1)
     assert semantic_onset.critical is None
+
+
+def test_tiny_denominator_propagation_bundle_is_bounded_and_temporal() -> None:
+    config = _config(
+        stages=[Stage.VISION.value, Stage.SEMANTIC.value],
+        thresholds={"warning": 0.005, "critical": 0.90},
+        diagnosis={
+            "epsilon": 1.0e-6,
+            "noise_floor": 0.005,
+            "propagation_ratio_cap": 10.0,
+            "downstream_window": 2,
+        },
+    )
+    table = _table(
+        {
+            Stage.VISION: [0.01, 0.01, 0.01],
+            Stage.SEMANTIC: [0.95, 0.95, 0.95],
+        },
+        thresholds={"warning": 0.005, "critical": 0.90},
+    )
+
+    propagation = compute_propagation_analysis(table, config)
+    score = propagation.propagation_scores[0]
+    diagnosis = compute_failure_diagnosis(
+        table,
+        propagation,
+        _paired_run(frame_count=3),
+        config,
+    )
+
+    assert score.aggregate_score is not None
+    assert score.aggregate_score > 90.0
+    assert score.ratio_clipped is not None
+    assert score.ratio_clipped <= 10.0
+    assert score.log_ratio is not None
+    assert isfinite(score.log_ratio)
+    assert score.absolute_increase == pytest.approx(0.94)
+    assert isfinite(score.absolute_increase)
+    assert score.downstream_persistence == pytest.approx(1.0)
+    assert diagnosis.primary_failure_stage != Stage.VISION
+    assert all("ratio" not in item.lower() for item in diagnosis.evidence)
 
 
 def test_missing_stages_do_not_block_diagnosis_or_fingerprint() -> None:
@@ -167,6 +215,7 @@ def test_fingerprint_aggregation_accepts_tables_and_json_files(tmp_path) -> None
 def _config(
     stages: list[str] | None = None,
     diagnosis: dict[str, float | int | str] | None = None,
+    thresholds: dict[str, float] | None = None,
 ) -> SD2Config:
     diagnosis_config: dict[str, float | int | str] = {
         "primary_failure_policy": "first_critical_with_downstream_increase",
@@ -190,13 +239,17 @@ def _config(
                 Stage.CONTROL.value,
                 Stage.OUTCOME.value,
             ],
-            "thresholds": {"warning": 0.4, "critical": 0.7},
+            "thresholds": thresholds or {"warning": 0.4, "critical": 0.7},
             "diagnosis": diagnosis_config,
         }
     )
 
 
-def _table(series_by_stage: dict[Stage, list[float]]) -> DeviationTable:
+def _table(
+    series_by_stage: dict[Stage, list[float]],
+    thresholds: dict[str, float] | None = None,
+) -> DeviationTable:
+    status_thresholds = thresholds or {"warning": 0.4, "critical": 0.7}
     records: list[DeviationRecord] = []
     frame_count = max(len(series) for series in series_by_stage.values())
     for frame_idx in range(frame_count):
@@ -215,7 +268,7 @@ def _table(series_by_stage: dict[Stage, list[float]]) -> DeviationTable:
                     normalized_score=score,
                     status=classify_status(
                         score,
-                        {"warning": 0.4, "critical": 0.7},
+                        status_thresholds,
                     ),
                     missing=False,
                     details={},

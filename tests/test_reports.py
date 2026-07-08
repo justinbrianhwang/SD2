@@ -30,6 +30,10 @@ def test_report_generation_from_sample_analysis_artifacts(tmp_path: Path) -> Non
 
     text = report_path.read_text(encoding="utf-8")
     assert "Reasoning" in text
+    assert "temporal-correlational" in text
+    assert "earliest critical deviation" in text
+    assert "preceding downstream" in text
+    assert "caused" not in text.lower()
     for header in [
         "## Summary Diagnosis",
         "## Final Outcome Comparison",

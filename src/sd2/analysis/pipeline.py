@@ -11,6 +11,7 @@ from sd2.analysis.diagnosis import compute_failure_diagnosis
 from sd2.analysis.deviation import compute_deviation_table
 from sd2.analysis.fingerprint import compute_robustness_fingerprint
 from sd2.analysis.propagation import compute_propagation_analysis
+from sd2.analysis.thresholds import resolve_threshold_set
 from sd2.core.config import load_config
 from sd2.core.run import pair_runs
 
@@ -37,15 +38,17 @@ def run_analysis(
     output_dir: str | Path,
     *,
     report: bool = False,
+    thresholds_path: str | Path | None = None,
 ) -> AnalysisOutput:
     """Run pairing, deviation, propagation, diagnosis, and fingerprint analysis."""
 
     config = load_config(config_path)
+    thresholds = resolve_threshold_set(config, thresholds_path)
     clean = load_run_jsonl(clean_path)
     stress = load_run_jsonl(stress_path)
     paired_run = pair_runs(clean, stress)
-    deviation_table = compute_deviation_table(paired_run, config)
-    propagation_result = compute_propagation_analysis(deviation_table, config)
+    deviation_table = compute_deviation_table(paired_run, config, thresholds)
+    propagation_result = compute_propagation_analysis(deviation_table, config, thresholds)
     diagnosis_result = compute_failure_diagnosis(
         deviation_table,
         propagation_result,
