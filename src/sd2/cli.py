@@ -10,6 +10,7 @@ from typing import Sequence
 from sd2 import __version__
 from sd2.analysis.pipeline import run_analysis
 from sd2.reports.markdown import generate_fingerprint_summary, generate_report
+from sd2.stressors.pipeline import run_stress
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -48,6 +49,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="analysis directory or parent directory containing analyses",
     )
     fingerprint.add_argument("--output", required=True, help="summary Markdown path")
+
+    stress = subparsers.add_parser("stress", help="apply input stress to image frames")
+    stress.add_argument("--input", required=True, help="input directory of PNG/JPG images")
+    stress.add_argument("--config", required=True, help="path to stress YAML config")
+    stress.add_argument("--output", required=True, help="output directory")
+    stress.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="deterministic RNG seed, default: 42",
+    )
     return parser
 
 
@@ -63,6 +75,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_report(args)
     if args.command == "fingerprint":
         return _run_fingerprint(args)
+    if args.command == "stress":
+        return _run_stress(args)
 
     parser.print_help()
     return 0
@@ -95,6 +109,20 @@ def _run_fingerprint(args: argparse.Namespace) -> int:
     try:
         generate_fingerprint_summary(args.analysis_dir, args.output)
     except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def _run_stress(args: argparse.Namespace) -> int:
+    try:
+        run_stress(
+            input_path=args.input,
+            config_path=args.config,
+            output_dir=args.output,
+            seed=args.seed,
+        )
+    except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     return 0

@@ -59,6 +59,13 @@ Aggregate one or more fingerprint outputs:
 python -m sd2.cli fingerprint --analysis-dir outputs --output outputs/fingerprint_summary.md
 ```
 
+Generate deterministic sample images and apply a stressor:
+
+```powershell
+python experiments/generate_sample_images.py
+python -m sd2.cli stress --input data/sample/images --config configs/stress/gaussian_noise.yaml --output outputs/stress_demo --seed 42
+```
+
 Run tests:
 
 ```powershell
@@ -89,16 +96,46 @@ The demo writes:
 
 A copy of the demo output (report and plots) is kept under [docs/example/](docs/example/) for reference.
 
+## Stressors
+
+Stressors perturb clean image inputs to produce offline stress-run inputs. Severity is an integer from `1` to `5`; `0` and out-of-range values are rejected. Each stressor maps that severity to concrete parameters internally and records those parameters in `stress_manifest.json`.
+
+Visual stressors operate on `HxWx3` RGB `uint8` images and write the same filenames to the output directory:
+
+- `gaussian_noise`
+- `motion_blur`
+- `brightness_shift`
+- `contrast_shift`
+- `jpeg_compression`
+- `low_light`
+
+Temporal stressors operate on the sorted image list as a frame sequence:
+
+- `frame_drop`
+- `frame_delay`
+- `camera_blackout`
+- `low_fps`
+
+For temporal materialization, dropped frames are omitted, camera blackouts are written as black images, and delayed frames hold earlier source images at the current output position. Run a stress pass with:
+
+```powershell
+python -m sd2.cli stress --input <image-dir> --config <stress-yaml> --output <output-dir> --seed 42
+```
+
+Existing stress configs live in `configs/stress/`, for example `gaussian_noise.yaml`, `motion_blur.yaml`, and `frame_drop.yaml`.
+
 ## Current Status
 
-MVP Phase 1 through Phase 8 are complete:
+MVP Phase 1 through the offline stressor layer are complete:
 
 - src-layout Python package scaffold
 - Pydantic v2 run and frame schema
 - deterministic JSONL sample data
+- deterministic sample image generator for stressor demos
 - JSONL run loader with line-numbered validation errors
 - clean/stress frame pairing with skipped-frame summary and saved run metadata
 - stage-wise metric registry and MVP metrics for vision, semantic, reasoning, planning, and control stages
+- visual and temporal stressor registry with `sd2 stress` CLI materialization
 - min-max clipping and threshold status classification (`healthy`, `warning`, `critical`)
 - propagation analysis with adjacent-stage scores, warning/critical collapse onsets, and downstream-increase evidence
 - failure diagnosis using `first_critical_with_downstream_increase`, with documented fallbacks
