@@ -126,6 +126,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=42,
         help="deterministic RNG seed, default: 42",
     )
+    benchmark.add_argument(
+        "--profile",
+        choices=["realistic", "hard"],
+        default="realistic",
+        help="synthetic benchmark profile, default: realistic",
+    )
     return parser
 
 
@@ -227,6 +233,7 @@ def _run_benchmark(args: argparse.Namespace) -> int:
             work_dir=args.output,
             n_per_class=args.n_per_class,
             seed=args.seed,
+            profile=args.profile,
         )
         output_dir = Path(args.output)
         result.write_json(output_dir / "benchmark_result.json")

@@ -45,6 +45,8 @@ class SyntheticRunPair:
     clean_frames: list[dict[str, Any]]
     stress_frames: list[dict[str, Any]]
     params: dict[str, Any]
+    ambiguity_type: str | None = None
+    ambiguous: bool = False
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,26 @@ class SyntheticCleanRun:
     frames: list[dict[str, Any]]
 
 
+@dataclass(frozen=True)
+class _ExtraDeviation:
+    stage: Stage
+    onset_frame: int
+    score: float
+    target: bool = False
+    mode: str = "stage_deviation"
+
+
+@dataclass(frozen=True)
+class _HardProfilePlan:
+    ambiguity_type: str
+    ambiguous: bool
+    target_score: float
+    downstream_stages: list[Stage]
+    downstream_delays: dict[str, int]
+    downstream_scores: dict[str, float]
+    extra_deviations: list[_ExtraDeviation]
+
+
 def generate_synthetic_pairs(
     n_per_class: int = 20,
     seed: int = 42,
@@ -78,14 +100,16 @@ def generate_synthetic_pairs(
     ``profile="realistic"`` varies onset, target magnitude, downstream
     propagation, and small run-to-run noise. ``profile="clean_cut"`` keeps the
     same SD2 JSONL path but uses larger margins for high-separability tests.
+    ``profile="hard"`` adds ambiguous competing faults where collapse order is
+    more informative than final magnitude.
     """
 
     if n_per_class < 1:
         raise ValueError("n_per_class must be at least 1")
     if frame_count < 12:
         raise ValueError("frame_count must be at least 12")
-    if profile not in {"realistic", "clean_cut"}:
-        raise ValueError("profile must be 'realistic' or 'clean_cut'")
+    if profile not in {"realistic", "clean_cut", "hard"}:
+        raise ValueError("profile must be 'realistic', 'clean_cut', or 'hard'")
 
     master_rng = random.Random(seed)
     pairs: list[SyntheticRunPair] = []
@@ -121,6 +145,9 @@ def materialize_pair(pair: SyntheticRunPair, output_dir: str | Path) -> Syntheti
         "onset_frame": pair.onset_frame,
         "frame_count": pair.frame_count,
         "pair_seed": pair.pair_seed,
+        "profile": pair.params.get("profile"),
+        "ambiguity_type": pair.ambiguity_type,
+        "ambiguous": pair.ambiguous,
         "params": pair.params,
     }
     label_path.write_text(json.dumps(label_payload, indent=2) + "\n", encoding="utf-8")
@@ -210,16 +237,34 @@ def _build_pair(
     onset_frame = _choose_onset(rng, frame_count, profile)
     route_phase = rng.uniform(-0.6, 0.6)
     curve_amplitude = rng.uniform(0.22, 0.46)
-    target_score = _target_score(rng, target_stage, profile)
-    downstream_stages = _choose_downstream_stages(rng, target_stage, profile)
-    downstream_delays = {
-        stage.value: (1 if profile == "clean_cut" else rng.randint(1, 3))
-        for stage in downstream_stages
-    }
-    downstream_scores = {
-        stage.value: _downstream_score(rng, target_score, profile)
-        for stage in downstream_stages
-    }
+    ambiguity_type = None
+    ambiguous = False
+    extra_deviations: list[_ExtraDeviation] = []
+    if profile == "hard":
+        hard_plan = _build_hard_profile_plan(
+            target_stage=target_stage,
+            sample_index=sample_index,
+            onset_frame=onset_frame,
+            rng=rng,
+        )
+        target_score = hard_plan.target_score
+        downstream_stages = hard_plan.downstream_stages
+        downstream_delays = hard_plan.downstream_delays
+        downstream_scores = hard_plan.downstream_scores
+        extra_deviations = hard_plan.extra_deviations
+        ambiguity_type = hard_plan.ambiguity_type
+        ambiguous = hard_plan.ambiguous
+    else:
+        target_score = _target_score(rng, target_stage, profile)
+        downstream_stages = _choose_downstream_stages(rng, target_stage, profile)
+        downstream_delays = {
+            stage.value: (1 if profile == "clean_cut" else rng.randint(1, 3))
+            for stage in downstream_stages
+        }
+        downstream_scores = {
+            stage.value: _downstream_score(rng, target_score, profile)
+            for stage in downstream_stages
+        }
     run_id = f"synthetic_{target_stage.value}_{sample_index:03d}_seed{pair_seed}"
     clean_run_id = f"{run_id}_clean"
     stress_run_id = f"{run_id}_stress"
@@ -268,6 +313,7 @@ def _build_pair(
             downstream_scores=downstream_scores,
             rng=rng,
             profile=profile,
+            extra_deviations=extra_deviations,
         )
         for clean_frame in clean_frames
     ]
@@ -278,6 +324,18 @@ def _build_pair(
         "downstream_stages": [stage.value for stage in downstream_stages],
         "downstream_delays": downstream_delays,
         "downstream_scores": downstream_scores,
+        "extra_deviations": [
+            {
+                "stage": extra.stage.value,
+                "onset_frame": extra.onset_frame,
+                "score": extra.score,
+                "target": extra.target,
+                "mode": extra.mode,
+            }
+            for extra in extra_deviations
+        ],
+        "ambiguity_type": ambiguity_type,
+        "ambiguous": ambiguous,
         "route_phase": route_phase,
         "curve_amplitude": curve_amplitude,
     }
@@ -293,6 +351,8 @@ def _build_pair(
         clean_frames=clean_frames,
         stress_frames=stress_frames,
         params=params,
+        ambiguity_type=ambiguity_type,
+        ambiguous=ambiguous,
     )
 
 
@@ -406,6 +466,7 @@ def _stress_frame(
     downstream_scores: dict[str, float],
     rng: random.Random,
     profile: str,
+    extra_deviations: list[_ExtraDeviation] | None = None,
 ) -> dict[str, Any]:
     frame = copy.deepcopy(clean_frame)
     frame["run_id"] = stress_run_id
@@ -434,7 +495,8 @@ def _stress_frame(
                 continue
             ramp = min(1.0, 0.62 + 0.16 * (frame_idx - start))
             score = downstream_scores[stage.value] * ramp
-            score = min(score, max(0.12, target_frame_score - 0.12))
+            if profile != "hard":
+                score = min(score, max(0.12, target_frame_score - 0.12))
             _apply_stage_deviation(
                 frame=frame,
                 clean_frame=clean_frame,
@@ -443,8 +505,167 @@ def _stress_frame(
                 target=False,
             )
 
+    for extra in extra_deviations or []:
+        if frame_idx < extra.onset_frame:
+            continue
+        if extra.mode == "warning_noise":
+            _apply_warning_noise(
+                frame=frame,
+                clean_frame=clean_frame,
+                stage=extra.stage,
+                score=extra.score,
+            )
+            continue
+        _apply_stage_deviation(
+            frame=frame,
+            clean_frame=clean_frame,
+            stage=extra.stage,
+            score=extra.score,
+            target=extra.target,
+        )
+
     _apply_driving_failure(frame, frame_count)
     return frame
+
+
+def _build_hard_profile_plan(
+    target_stage: Stage,
+    sample_index: int,
+    onset_frame: int,
+    rng: random.Random,
+) -> _HardProfilePlan:
+    ambiguity_type = _choose_hard_ambiguity_type(target_stage, sample_index)
+    if ambiguity_type == "competing_collapse":
+        downstream_stage = _choose_downstream_stage(rng, target_stage, adjacent=False)
+        target_score = rng.uniform(0.72, 0.80)
+        downstream_score = rng.uniform(max(0.84, target_score + 0.08), 0.98)
+        return _HardProfilePlan(
+            ambiguity_type=ambiguity_type,
+            ambiguous=False,
+            target_score=target_score,
+            downstream_stages=[downstream_stage],
+            downstream_delays={downstream_stage.value: rng.choice([1, 2])},
+            downstream_scores={downstream_stage.value: downstream_score},
+            extra_deviations=[],
+        )
+
+    if ambiguity_type == "strong_propagation":
+        downstream_stage = _choose_downstream_stage(rng, target_stage, adjacent=False)
+        target_score = rng.uniform(0.71, 0.78)
+        downstream_score = rng.uniform(max(0.90, target_score + 0.14), 1.0)
+        return _HardProfilePlan(
+            ambiguity_type=ambiguity_type,
+            ambiguous=False,
+            target_score=target_score,
+            downstream_stages=[downstream_stage],
+            downstream_delays={downstream_stage.value: rng.choice([2, 3])},
+            downstream_scores={downstream_stage.value: downstream_score},
+            extra_deviations=[],
+        )
+
+    if ambiguity_type == "near_simultaneous":
+        target_score = rng.uniform(0.76, 0.88)
+        adjacent_score = rng.uniform(0.78, 0.90)
+        if target_stage.index() < len(FAULT_STAGES) - 1:
+            adjacent_stage = FAULT_STAGES[target_stage.index() + 1]
+            return _HardProfilePlan(
+                ambiguity_type=ambiguity_type,
+                ambiguous=True,
+                target_score=target_score,
+                downstream_stages=[adjacent_stage],
+                downstream_delays={adjacent_stage.value: 1},
+                downstream_scores={adjacent_stage.value: adjacent_score},
+                extra_deviations=[],
+            )
+
+        adjacent_stage = FAULT_STAGES[target_stage.index() - 1]
+        return _HardProfilePlan(
+            ambiguity_type=ambiguity_type,
+            ambiguous=True,
+            target_score=target_score,
+            downstream_stages=[],
+            downstream_delays={},
+            downstream_scores={},
+            extra_deviations=[
+                _ExtraDeviation(
+                    stage=adjacent_stage,
+                    onset_frame=onset_frame + 1,
+                    score=adjacent_score,
+                    target=False,
+                )
+            ],
+        )
+
+    if ambiguity_type == "noisy_upstream":
+        upstream_stage = FAULT_STAGES[target_stage.index() - 1]
+        return _HardProfilePlan(
+            ambiguity_type=ambiguity_type,
+            ambiguous=False,
+            target_score=rng.uniform(0.76, 0.90),
+            downstream_stages=[],
+            downstream_delays={},
+            downstream_scores={},
+            extra_deviations=[
+                _ExtraDeviation(
+                    stage=upstream_stage,
+                    onset_frame=max(0, onset_frame - 2),
+                    score=_warning_noise_score(upstream_stage),
+                    mode="warning_noise",
+                )
+            ],
+        )
+
+    raise ValueError(f"unsupported hard ambiguity type {ambiguity_type!r}")
+
+
+def _choose_hard_ambiguity_type(target_stage: Stage, sample_index: int) -> str:
+    if target_stage == Stage.VISION:
+        choices = [
+            "competing_collapse",
+            "strong_propagation",
+            "near_simultaneous",
+        ]
+    elif target_stage == Stage.CONTROL:
+        choices = [
+            "noisy_upstream",
+            "near_simultaneous",
+        ]
+    else:
+        choices = [
+            "noisy_upstream",
+            "competing_collapse",
+            "strong_propagation",
+            "near_simultaneous",
+        ]
+    return choices[sample_index % len(choices)]
+
+
+def _choose_downstream_stage(
+    rng: random.Random,
+    target_stage: Stage,
+    *,
+    adjacent: bool,
+) -> Stage:
+    candidates = [
+        stage
+        for stage in FAULT_STAGES
+        if stage.index() > target_stage.index()
+    ]
+    if not candidates:
+        raise ValueError(f"{target_stage.value} has no downstream fault stage")
+    if adjacent:
+        return candidates[0]
+    return rng.choice(candidates)
+
+
+def _warning_noise_score(stage: Stage) -> float:
+    if stage == Stage.SEMANTIC:
+        return 0.55
+    if stage == Stage.REASONING:
+        return 0.50
+    if stage == Stage.CONTROL:
+        return 0.45
+    return 0.50
 
 
 def _apply_pair_jitter(
@@ -502,6 +723,49 @@ def _apply_pair_jitter(
         max(0.0, min(1.0, float(clean_control["brake"]) + rng.uniform(0.0, 0.012) * scale)),
         3,
     )
+
+
+def _apply_warning_noise(
+    frame: dict[str, Any],
+    clean_frame: dict[str, Any],
+    stage: Stage,
+    score: float,
+) -> None:
+    if stage in {Stage.VISION, Stage.SEMANTIC, Stage.PLANNING}:
+        _apply_stage_deviation(
+            frame=frame,
+            clean_frame=clean_frame,
+            stage=stage,
+            score=score,
+            target=False,
+        )
+        return
+
+    clean_state = clean_frame["states"][stage.value]
+    state = frame["states"][stage.value]
+    if stage == Stage.REASONING:
+        if clean_state.get("intent") == "slow_down":
+            state["text"] = (
+                "A walker is close to the crossing; reduce speed smoothly."
+            )
+        else:
+            state["text"] = (
+                "Road markings are visible and nearby traffic is present; keep centered."
+            )
+        state["intent"] = clean_state.get("intent")
+        state["critical_object_mentioned"] = clean_state.get(
+            "critical_object_mentioned",
+            True,
+        )
+        return
+
+    if stage == Stage.CONTROL:
+        clean_steer = float(clean_state["steer"])
+        clean_throttle = float(clean_state["throttle"])
+        clean_brake = float(clean_state["brake"])
+        state["steer"] = round(_bounded_shift(clean_steer, 1.05, -1.0, 1.0), 3)
+        state["throttle"] = round(_bounded_shift(clean_throttle, -0.30, 0.0, 1.0), 3)
+        state["brake"] = round(_bounded_shift(clean_brake, 0.30, 0.0, 1.0), 3)
 
 
 def _apply_stage_deviation(

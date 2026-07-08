@@ -73,6 +73,69 @@ class ReasoningIntentMismatchMetric(StageMetric):
         )
 
 
+@register_metric("reasoning_intent_only")
+class ReasoningIntentOnlyMetric(ReasoningIntentMismatchMetric):
+    """Intent-mismatch-only reasoning ablation."""
+
+    def __init__(
+        self,
+        stage: Stage,
+        name: str = "reasoning_intent_only",
+        weights: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            stage=stage,
+            name=name,
+            weights={
+                "text_embedding": 0.0,
+                "intent_mismatch": 1.0,
+                "critical_object_mismatch": 0.0,
+            },
+        )
+
+
+@register_metric("reasoning_text_only")
+class ReasoningTextOnlyMetric(ReasoningIntentMismatchMetric):
+    """Token-set lexical-distance-only reasoning ablation."""
+
+    def __init__(
+        self,
+        stage: Stage,
+        name: str = "reasoning_text_only",
+        weights: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            stage=stage,
+            name=name,
+            weights={
+                "text_embedding": 1.0,
+                "intent_mismatch": 0.0,
+                "critical_object_mismatch": 0.0,
+            },
+        )
+
+
+@register_metric("reasoning_critical_object_only")
+class ReasoningCriticalObjectOnlyMetric(ReasoningIntentMismatchMetric):
+    """Critical-object-mention-only reasoning ablation."""
+
+    def __init__(
+        self,
+        stage: Stage,
+        name: str = "reasoning_critical_object_only",
+        weights: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            stage=stage,
+            name=name,
+            weights={
+                "text_embedding": 0.0,
+                "intent_mismatch": 0.0,
+                "critical_object_mismatch": 1.0,
+            },
+        )
+
+
 def _reasoning_text(state: Any) -> str:
     for attr_name in ("text", "decision_text", "explanation"):
         value = getattr(state, attr_name, None)

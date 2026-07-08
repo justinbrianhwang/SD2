@@ -94,6 +94,55 @@ def test_fault_benchmark_is_deterministic_for_same_seed(tmp_path: Path) -> None:
     assert first_signature == second_signature
 
 
+def test_hard_fault_benchmark_exposes_breakdowns_and_is_deterministic(
+    tmp_path: Path,
+) -> None:
+    first = run_fault_benchmark(
+        config_path="configs/mvp.yaml",
+        work_dir=tmp_path / "first_hard",
+        n_per_class=2,
+        seed=17,
+        frame_count=18,
+        profile="hard",
+    )
+    second = run_fault_benchmark(
+        config_path="configs/mvp.yaml",
+        work_dir=tmp_path / "second_hard",
+        n_per_class=2,
+        seed=17,
+        frame_count=18,
+        profile="hard",
+    )
+
+    assert first.profile == "hard"
+    assert first.per_ambiguity_type_accuracy
+    assert first.ambiguous_accuracy is not None
+    assert any(record.ambiguous for record in first.records)
+    assert all(record.ambiguity_type for record in first.records)
+
+    first_signature = [
+        (
+            record.target_stage,
+            record.predicted_stage,
+            record.ambiguity_type,
+            record.ambiguous,
+            record.onset_frame,
+        )
+        for record in first.records
+    ]
+    second_signature = [
+        (
+            record.target_stage,
+            record.predicted_stage,
+            record.ambiguity_type,
+            record.ambiguous,
+            record.onset_frame,
+        )
+        for record in second.records
+    ]
+    assert first_signature == second_signature
+
+
 def test_benchmark_cli_end_to_end(tmp_path: Path) -> None:
     output_dir = tmp_path / "benchmark"
     env = os.environ.copy()
@@ -114,6 +163,8 @@ def test_benchmark_cli_end_to_end(tmp_path: Path) -> None:
             "1",
             "--seed",
             "5",
+            "--profile",
+            "hard",
         ],
         check=False,
         env=env,
@@ -126,6 +177,8 @@ def test_benchmark_cli_end_to_end(tmp_path: Path) -> None:
     assert (output_dir / "benchmark_result.json").is_file()
     assert (output_dir / "benchmark_report.md").is_file()
     assert (output_dir / "confusion_matrix.png").is_file()
+    payload = json.loads((output_dir / "benchmark_result.json").read_text(encoding="utf-8"))
+    assert payload["profile"] == "hard"
 
 
 def _record(

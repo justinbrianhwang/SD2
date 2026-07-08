@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -34,6 +34,8 @@ class BenchmarkRecord:
     sample_dir: str
     diagnosis_status: str | None = None
     fallback_used: str | None = None
+    ambiguity_type: str | None = None
+    ambiguous: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable record."""
@@ -47,6 +49,8 @@ class BenchmarkRecord:
             "sample_dir": self.sample_dir,
             "diagnosis_status": self.diagnosis_status,
             "fallback_used": self.fallback_used,
+            "ambiguity_type": self.ambiguity_type,
+            "ambiguous": self.ambiguous,
         }
 
 
@@ -58,6 +62,9 @@ class BenchmarkResult:
     overall_accuracy: float
     per_class_accuracy: dict[str, float]
     confusion_matrix: dict[str, dict[str, int]]
+    profile: str = "realistic"
+    per_ambiguity_type_accuracy: dict[str, float] = field(default_factory=dict)
+    ambiguous_accuracy: float | None = None
     n_per_class: int | None = None
     seed: int | None = None
     frame_count: int | None = None
@@ -71,6 +78,9 @@ class BenchmarkResult:
             "overall_accuracy": self.overall_accuracy,
             "per_class_accuracy": self.per_class_accuracy,
             "confusion_matrix": self.confusion_matrix,
+            "profile": self.profile,
+            "per_ambiguity_type_accuracy": self.per_ambiguity_type_accuracy,
+            "ambiguous_accuracy": self.ambiguous_accuracy,
             "records": [record.to_dict() for record in self.records],
             "n_per_class": self.n_per_class,
             "seed": self.seed,
@@ -137,6 +147,7 @@ def run_fault_benchmark(
         frame_count=frame_count,
         config_path=str(config_path),
         work_dir=str(root),
+        profile=profile,
     )
 
 
@@ -148,6 +159,7 @@ def compute_benchmark_result(
     frame_count: int | None = None,
     config_path: str | None = None,
     work_dir: str | None = None,
+    profile: str = "realistic",
 ) -> BenchmarkResult:
     """Compute accuracy and confusion summaries from per-sample records."""
 
@@ -178,11 +190,40 @@ def compute_benchmark_result(
             confusion[target][predicted] = 0
         confusion[target][predicted] += 1
 
+    per_ambiguity_type_accuracy: dict[str, float] = {}
+    ambiguity_types = sorted(
+        {
+            record.ambiguity_type
+            for record in record_list
+            if record.ambiguity_type is not None
+        }
+    )
+    for ambiguity_type in ambiguity_types:
+        type_records = [
+            record
+            for record in record_list
+            if record.ambiguity_type == ambiguity_type
+        ]
+        per_ambiguity_type_accuracy[ambiguity_type] = (
+            sum(1 for record in type_records if record.correct) / len(type_records)
+        )
+
+    ambiguous_records = [record for record in record_list if record.ambiguous]
+    ambiguous_accuracy = None
+    if ambiguous_records:
+        ambiguous_accuracy = (
+            sum(1 for record in ambiguous_records if record.correct)
+            / len(ambiguous_records)
+        )
+
     return BenchmarkResult(
         records=record_list,
         overall_accuracy=overall_accuracy,
         per_class_accuracy=per_class_accuracy,
         confusion_matrix=confusion,
+        profile=profile,
+        per_ambiguity_type_accuracy=per_ambiguity_type_accuracy,
+        ambiguous_accuracy=ambiguous_accuracy,
         n_per_class=n_per_class,
         seed=seed,
         frame_count=frame_count,
@@ -207,6 +248,8 @@ def _record_from_pair(
         sample_dir=str(sample_dir),
         diagnosis_status=diagnosis.get("status"),
         fallback_used=diagnosis.get("fallback_used"),
+        ambiguity_type=pair.ambiguity_type,
+        ambiguous=pair.ambiguous,
     )
 
 

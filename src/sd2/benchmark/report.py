@@ -68,6 +68,10 @@ def render_benchmark_markdown(
         "pairs are generated with a known primary failure stage, then SD2 scores "
         "only the diagnosis returned by the real offline analysis pipeline.",
         "",
+        f"Profile: `{result.profile}`",
+        "",
+        _hard_breakdown_section(result),
+        "",
         "## Per-class Accuracy",
         "",
         _per_class_table(result),
@@ -83,7 +87,7 @@ def render_benchmark_markdown(
         _confusion_analysis(result),
         "",
     ]
-    return "\n".join(lines).rstrip() + "\n"
+    return "\n".join(line for line in lines if line is not None).rstrip() + "\n"
 
 
 def plot_confusion_matrix(result: BenchmarkResult, output_path: str | Path) -> Path:
@@ -133,6 +137,72 @@ def _per_class_table(result: BenchmarkResult) -> str:
             )
         )
     return _simple_table(["Class", "Accuracy", "Samples"], rows)
+
+
+def _hard_breakdown_section(result: BenchmarkResult) -> str | None:
+    if result.profile != "hard":
+        return None
+    return "\n".join(
+        [
+            "## Hard-tier Breakdown",
+            "",
+            _hard_breakdown_table(result),
+            "",
+            _ambiguous_accuracy_line(result),
+            "",
+            _hard_breakdown_analysis(result),
+        ]
+    )
+
+
+def _hard_breakdown_table(result: BenchmarkResult) -> str:
+    support = Counter(
+        record.ambiguity_type
+        for record in result.records
+        if record.ambiguity_type is not None
+    )
+    rows = []
+    for ambiguity_type, accuracy in sorted(result.per_ambiguity_type_accuracy.items()):
+        rows.append(
+            (
+                _display_ambiguity_type(ambiguity_type),
+                f"{accuracy * 100:.1f}%",
+                str(support.get(ambiguity_type, 0)),
+            )
+        )
+    if not rows:
+        rows.append(("No hard labels", "n/a", "0"))
+    return _simple_table(["Ambiguity Type", "Accuracy", "Samples"], rows)
+
+
+def _ambiguous_accuracy_line(result: BenchmarkResult) -> str:
+    ambiguous_count = sum(1 for record in result.records if record.ambiguous)
+    if result.ambiguous_accuracy is None:
+        return "Ambiguous-only accuracy: n/a (0 samples)."
+    return (
+        "Ambiguous-only accuracy: "
+        f"{result.ambiguous_accuracy * 100:.1f}% ({ambiguous_count} samples)."
+    )
+
+
+def _hard_breakdown_analysis(result: BenchmarkResult) -> str:
+    if not result.per_ambiguity_type_accuracy:
+        return "No hard-tier ambiguity labels were present in this result."
+    lowest_type, lowest_accuracy = min(
+        result.per_ambiguity_type_accuracy.items(),
+        key=lambda item: item[1],
+    )
+    if lowest_accuracy >= 1.0:
+        return (
+            "All hard-tier ambiguity types were diagnosed correctly in this run. "
+            "This can happen on small samples, but larger hard runs should be "
+            "checked for discriminative failures."
+        )
+    return (
+        "Lowest hard-tier slice: "
+        f"{_display_ambiguity_type(lowest_type)} at {lowest_accuracy * 100:.1f}%. "
+        "This is reported as a real diagnostic limitation, not tuned away."
+    )
 
 
 def _confusion_table(result: BenchmarkResult) -> str:
@@ -205,6 +275,10 @@ def _display_stage(stage: str) -> str:
     if stage == NO_FAILURE:
         return "No Failure"
     return stage.replace("_", " ").title()
+
+
+def _display_ambiguity_type(ambiguity_type: str) -> str:
+    return ambiguity_type.replace("_", " ").title()
 
 
 def _md(value: str) -> str:

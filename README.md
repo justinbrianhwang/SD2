@@ -61,6 +61,37 @@ the embedded confusion heatmap:
 
 ![Synthetic benchmark confusion matrix](docs/example/confusion_matrix.png)
 
+### Hard Benchmark Tier
+
+The benchmark also has a hard profile with competing and ambiguous faults:
+competing collapse, strong propagation, near-simultaneous adjacent collapse,
+and noisy upstream distractors. These samples are labeled by the intended
+origin stage, and near-simultaneous cases carry `ambiguous: true` in
+`label.json`. The hard tier is meant to be discriminative, so accuracy below
+100% is expected and should be reported honestly.
+
+```powershell
+sd2 benchmark --config configs/mvp.yaml --output outputs/fault_benchmark_hard --profile hard --n-per-class 20 --seed 42
+```
+
+Hard reports keep the confusion matrix and add per-ambiguity-type accuracy plus
+an ambiguous-only accuracy slice.
+
+### Reasoning Metric: Ablations and Known Limitations
+
+The default reasoning metric remains `text_embedding_and_intent` with weights
+`text_embedding=0.5`, `intent_mismatch=0.3`, and
+`critical_object_mismatch=0.2`. Three ablation variants are registered for
+review analysis: `reasoning_intent_only`, `reasoning_text_only`, and
+`reasoning_critical_object_only`.
+
+The current `text_embedding` component is a token-set Jaccard distance, not a
+semantic embedding. It is intentionally documented as paraphrase-fragile:
+same-meaning rewrites can score as large lexical deviations, while small word
+edits can hide decision changes. Intent weighting mitigates this for the MVP,
+and the ablation probe motivates a future embedding or judge-based upgrade.
+See [docs/example/reasoning_ablation.md](docs/example/reasoning_ablation.md).
+
 ## Quickstart
 
 Create and activate the conda environment:
@@ -200,6 +231,8 @@ MVP Phase 1 through the offline stressor layer are complete:
 - `sd2 analyze --report`, `sd2 report`, and `sd2 fingerprint` CLI flows
 - `experiments/run_mvp.py` one-command demo
 - labeled synthetic fault-injection benchmark with `sd2 benchmark`
+- hard/ambiguous synthetic benchmark profile with per-ambiguity reporting
+- reasoning metric ablations and paraphrase-robustness probe
 - `experiments/run_fault_benchmark.py` one-command validation demo
 
 CARLA integration and model-specific closed-loop adapters remain out of scope for the offline MVP. The synthetic benchmark validates the SD2 diagnosis machinery on controlled offline logs; it does not replace real-model robustness experiments.
