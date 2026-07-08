@@ -162,6 +162,55 @@ If Windows temp permissions interfere with pytest, use:
 conda run -n sd2 python -m pytest -q --basetemp .pytest_basetemp
 ```
 
+## CARLA Logging (Real Closed-Loop)
+
+CARLA is not a core package dependency because its wheel is local and
+platform-specific. Install CARLA 0.9.16 manually inside the `sd2` environment:
+
+```powershell
+pip install external/Carla/CARLA_0.9.16/PythonAPI/carla/dist/carla-0.9.16-*.whl
+```
+
+The recording client drives with CARLA's `BasicAgent`, which requires two extra
+packages:
+
+```powershell
+pip install shapely networkx
+```
+
+Launch the CARLA server from the CARLA install directory:
+
+```powershell
+CarlaUE4.exe -quality-level=Low -RenderOffScreen -carla-rpc-port=2000
+```
+
+Record a clean run:
+
+```powershell
+python experiments/carla_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 200 --warmup 20 --seed 42 --delta 0.05 --stress none --output data/carla/town10_clean_seed42.jsonl --spawn-index 0
+```
+
+Record a matched `control_noise` stress run with the same seed, town, frame
+count, and spawn index:
+
+```powershell
+python experiments/carla_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 200 --warmup 20 --seed 42 --delta 0.05 --stress control_noise --stress-severity 3 --output data/carla/town10_control_noise_s3_seed42.jsonl --spawn-index 0
+```
+
+Analyze the pair:
+
+```powershell
+sd2 analyze --clean data/carla/town10_clean_seed42.jsonl --stress data/carla/town10_control_noise_s3_seed42.jsonl --config configs/mvp.yaml --output outputs/carla_control_noise_s3 --report
+```
+
+The CARLA recorder currently populates only Planning, Control, and Outcome
+states: waypoints, target speed, ego pose/speed, vehicle controls, collision,
+lane invasion, route progress, and optional TTC. Vision, Semantic, and
+Reasoning are intentionally absent until a model adapter is available, so these
+logs are Observability Tier 0/1. Clean and stress runs are designed to pair by
+`frame_idx`; severe weather or control noise can still make the closed-loop
+trajectory diverge, so frame pairing is an alignment convention for analysis.
+
 ## Expected Outputs
 
 The demo writes:
