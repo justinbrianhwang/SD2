@@ -20,6 +20,43 @@ From this, the diagnosis module generates a natural-language summary:
 
 See the full generated report at [docs/example/example_report.md](docs/example/example_report.md).
 
+## Validation: Synthetic Fault Injection Benchmark
+
+SD2 includes a synthetic fault-injection benchmark for validating the diagnosis
+framework itself. This is a framework sanity check, not a real-model experiment:
+it creates clean/stress JSONL run pairs where the primary failure stage is known
+by construction, runs the full `run_analysis` pipeline, and scores
+`diagnosis.json` against the label.
+
+The five labeled fault classes are:
+
+- `vision`: large visual embedding cosine deviation
+- `semantic`: object-set collapse plus critical-object and traffic-light flips
+- `reasoning`: intent/text/critical-object mention mismatch
+- `planning`: waypoint and target-speed divergence
+- `control`: steer/throttle/brake command spike
+
+Run the benchmark with:
+
+```powershell
+sd2 benchmark --config configs/mvp.yaml --output outputs/fault_benchmark --n-per-class 20 --seed 42
+```
+
+Or run the demo wrapper:
+
+```powershell
+python experiments/run_fault_benchmark.py
+```
+
+The default demo writes `benchmark_result.json`, `benchmark_report.md`, and
+`confusion_matrix.png`. The current example result is 100.0% overall accuracy
+with 100.0% per-class accuracy on all five synthetic classes; this indicates
+that the implemented diagnosis policy matches the controlled synthetic origins.
+See [docs/example/benchmark_report.md](docs/example/benchmark_report.md) and
+the embedded confusion heatmap:
+
+![Synthetic benchmark confusion matrix](docs/example/confusion_matrix.png)
+
 ## Quickstart
 
 Create and activate the conda environment:
@@ -143,8 +180,10 @@ MVP Phase 1 through the offline stressor layer are complete:
 - Markdown report generation with stage timeline, fingerprint, and propagation plots
 - `sd2 analyze --report`, `sd2 report`, and `sd2 fingerprint` CLI flows
 - `experiments/run_mvp.py` one-command demo
+- labeled synthetic fault-injection benchmark with `sd2 benchmark`
+- `experiments/run_fault_benchmark.py` one-command validation demo
 
-CARLA integration and model-specific closed-loop adapters remain out of scope for the offline MVP.
+CARLA integration and model-specific closed-loop adapters remain out of scope for the offline MVP. The synthetic benchmark validates the SD2 diagnosis machinery on controlled offline logs; it does not replace real-model robustness experiments.
 
 ## Metric Config
 

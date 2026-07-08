@@ -9,6 +9,8 @@ from typing import Sequence
 
 from sd2 import __version__
 from sd2.analysis.pipeline import run_analysis
+from sd2.benchmark.report import generate_benchmark_report, headline_accuracy
+from sd2.benchmark.runner import run_fault_benchmark
 from sd2.reports.markdown import generate_fingerprint_summary, generate_report
 from sd2.stressors.pipeline import run_stress
 
@@ -60,6 +62,25 @@ def build_parser() -> argparse.ArgumentParser:
         default=42,
         help="deterministic RNG seed, default: 42",
     )
+
+    benchmark = subparsers.add_parser(
+        "benchmark",
+        help="run the synthetic primary-failure-stage benchmark",
+    )
+    benchmark.add_argument("--config", required=True, help="path to YAML config")
+    benchmark.add_argument("--output", required=True, help="output directory")
+    benchmark.add_argument(
+        "--n-per-class",
+        type=int,
+        default=20,
+        help="synthetic samples per target stage, default: 20",
+    )
+    benchmark.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="deterministic RNG seed, default: 42",
+    )
     return parser
 
 
@@ -77,6 +98,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_fingerprint(args)
     if args.command == "stress":
         return _run_stress(args)
+    if args.command == "benchmark":
+        return _run_benchmark(args)
 
     parser.print_help()
     return 0
@@ -125,6 +148,25 @@ def _run_stress(args: argparse.Namespace) -> int:
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    return 0
+
+
+def _run_benchmark(args: argparse.Namespace) -> int:
+    try:
+        result = run_fault_benchmark(
+            config_path=args.config,
+            work_dir=args.output,
+            n_per_class=args.n_per_class,
+            seed=args.seed,
+        )
+        output_dir = Path(args.output)
+        result.write_json(output_dir / "benchmark_result.json")
+        generate_benchmark_report(result, output_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(headline_accuracy(result))
     return 0
 
 
