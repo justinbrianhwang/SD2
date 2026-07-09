@@ -26,3 +26,6 @@ outputs/*
 .idea/
 Thumbs.db
 *.lnk
+
+# Local E2E model repos + checkpoints (own licenses, large weights)
+models/

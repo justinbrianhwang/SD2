@@ -22,6 +22,7 @@ from sd2.stressors import (
 VISUAL_TYPES = [
     "gaussian_noise",
     "motion_blur",
+    "fog",
     "brightness_shift",
     "contrast_shift",
     "jpeg_compression",
