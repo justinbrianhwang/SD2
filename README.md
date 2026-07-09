@@ -54,25 +54,14 @@ SD2 diagnoses six published E2E driving models. The model weights and code are
 consumed read-only through gitignored `models/` junctions; nothing in this repo
 redistributes them. Original sources:
 
-| Model | Implementation used | Original paper (venue) | Sensors | SD2 stages observed |
+| Model | Source repository | Paper (venue) | Sensors | SD2 stages observed |
 | --- | --- | --- | --- | --- |
 | **InterFuser** | [opendilab/InterFuser](https://github.com/opendilab/InterFuser) | Shao et al., CoRL 2022 | camera + LiDAR | vision, **semantic** (object density), planning, control |
-| **TransFuser** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser), `models_2022` | Chitta et al., TPAMI 2023 — extends Prakash et al., CVPR 2021 | camera + LiDAR | vision, **semantic** (BEV-seg / detections), planning, control |
-| **AIM** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser), in-repo baseline | Prakash et al., CVPR 2021 | camera | vision, planning, control (no semantic head) |
-| **CILRS** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser), in-repo re-implementation | Codevilla et al., ICCV 2019 — original code [felipecode/coiltraine](https://github.com/felipecode/coiltraine) | camera | vision, control (no semantic / waypoints) |
+| **TransFuser** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Chitta et al., CVPR 2021 / TPAMI 2023 | camera + LiDAR | vision, **semantic** (BEV-seg / detections), planning, control |
+| **AIM** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Chitta et al., CVPR 2021 (baseline) | camera | vision, planning, control (no semantic head) |
+| **CILRS** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Codevilla et al., ICCV 2019 (reimpl.) | camera | vision, control (no semantic / waypoints) |
 | **NEAT** | [autonomousvision/neat](https://github.com/autonomousvision/neat) | Chitta et al., ICCV 2021 | multi-camera | vision, **semantic** (BEV occupancy), planning, control |
-| **TCP** | [OpenDriveLab/TCP](https://github.com/OpenDriveLab/TCP), weights [Thinklab-SJTU/Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo) (`tcp_b2d.ckpt`) | Wu et al., NeurIPS 2022 | camera | vision, planning, control (no semantic head) |
-
-Three rows point at the same repository, so the provenance is worth spelling out:
-
-- **AIM** and **CILRS** have no standalone release. Both ship as baselines inside the
-  TransFuser repository, and we load its CVPR-2021 model-zoo checkpoints
-  (`aim/best_model.pth`, `cilrs/best_model.pth`). The CILRS here is the TransFuser
-  authors' re-implementation of Codevilla et al., not the original `coiltraine` code.
-- The **TransFuser** checkpoint is `models_2022/transfuser`, i.e. the TPAMI-2023 model
-  rather than the original CVPR-2021 one.
-- The **TCP** weights are `tcp_b2d.ckpt` from Bench2DriveZoo — TCP retrained on
-  Bench2Drive, not the original NeurIPS-2022 CARLA-Leaderboard weights.
+| **TCP** | [OpenDriveLab/TCP](https://github.com/OpenDriveLab/TCP) · weights [Thinklab-SJTU/Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo) | Wu et al., NeurIPS 2022 | camera | vision, planning, control (no semantic head) |
 
 ## Results: live CARLA robustness diagnosis
 
@@ -185,7 +174,7 @@ Per-stage scores are directly comparable across models; the two mean columns are
 ### Cross-town robustness and generalization (Gaussian noise, severity 3, seed 42)
 
 Running the same models on other maps exposes a second, model-level result: these
-publicly released checkpoints **do not generalize across towns**. Driving is also strongly
+2021-era checkpoints **do not generalize across towns**. Driving is also strongly
 **spawn-dependent** — a spawn on open road drives, a spawn facing a junction
 crashes — so each town was probed with a NEAT spawn scout (`spawn_scout`) to find
 a drivable start before recording.
