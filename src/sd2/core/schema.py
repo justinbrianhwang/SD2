@@ -160,7 +160,7 @@ class FrameLog(BaseModel):
 
 
 class PairedFrameLog(BaseModel):
-    """Clean/stress frame pair aligned by model, scenario, seed, and frame index."""
+    """Clean/stress frame pair indexed by the clean frame."""
 
     model_config = ConfigDict(extra="forbid")
 

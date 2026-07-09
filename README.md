@@ -162,6 +162,30 @@ If Windows temp permissions interfere with pytest, use:
 conda run -n sd2 python -m pytest -q --basetemp .pytest_basetemp
 ```
 
+## Pairing Anchors
+
+Clean and stress runs are paired by `pairing.mode` in the YAML config. The
+default is `frame_idx`, which preserves the original MVP behavior: only equal
+frame indices are paired, and the pair key remains
+`model_id:scenario_id:seed:<clean_frame_idx>`.
+
+Two alternate clean-centric anchors are available for closed-loop runs where
+stress can change the ego trajectory. `timestamp` pairs each clean frame with
+the nearest stress timestamp within `pairing.timestamp_tolerance` seconds.
+`route_progress` pairs each clean frame with the nearest stress
+`outcome.route_progress` within `pairing.progress_tolerance`; this is useful
+when heavy stress makes the ego lag, drift, or reach intersections at different
+frame numbers. Route-progress mode requires `outcome.route_progress` on both
+runs; otherwise use `frame_idx`.
+
+For every mode, emitted pairs keep the clean frame's `frame_idx` and
+`timestamp`, so deviation timelines, propagation, and onset logic remain on the
+clean-run timeline. `pairing_summary.json` reports `mode`,
+`mean_anchor_mismatch`, and `max_anchor_mismatch`; units are frame-index delta
+for `frame_idx` (always `0.0`), seconds for `timestamp`, and route-progress
+fraction for `route_progress`. This addresses the known caveat that pure
+frame-index pairing can misalign comparable driving states under heavy stress.
+
 ## CARLA Logging (Real Closed-Loop)
 
 CARLA is not a core package dependency because its wheel is local and

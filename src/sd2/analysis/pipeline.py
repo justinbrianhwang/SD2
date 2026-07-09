@@ -13,7 +13,12 @@ from sd2.analysis.fingerprint import compute_robustness_fingerprint
 from sd2.analysis.propagation import compute_propagation_analysis
 from sd2.analysis.thresholds import resolve_threshold_set
 from sd2.core.config import load_config
-from sd2.core.run import pair_runs
+from sd2.core.run import (
+    DEFAULT_PAIRING_MODE,
+    DEFAULT_PROGRESS_TOLERANCE,
+    DEFAULT_TIMESTAMP_TOLERANCE,
+    pair_runs,
+)
 
 
 @dataclass(frozen=True)
@@ -46,7 +51,7 @@ def run_analysis(
     thresholds = resolve_threshold_set(config, thresholds_path)
     clean = load_run_jsonl(clean_path)
     stress = load_run_jsonl(stress_path)
-    paired_run = pair_runs(clean, stress)
+    paired_run = pair_runs(clean, stress, **_pairing_options(config.pairing))
     deviation_table = compute_deviation_table(paired_run, config, thresholds)
     propagation_result = compute_propagation_analysis(deviation_table, config, thresholds)
     diagnosis_result = compute_failure_diagnosis(
@@ -105,3 +110,17 @@ def run_analysis(
         fingerprint_path=fingerprint_path,
         report_path=report_path,
     )
+
+
+def _pairing_options(pairing: dict[str, object]) -> dict[str, object]:
+    return {
+        "mode": pairing.get("mode", DEFAULT_PAIRING_MODE),
+        "timestamp_tolerance": pairing.get(
+            "timestamp_tolerance",
+            DEFAULT_TIMESTAMP_TOLERANCE,
+        ),
+        "progress_tolerance": pairing.get(
+            "progress_tolerance",
+            DEFAULT_PROGRESS_TOLERANCE,
+        ),
+    }

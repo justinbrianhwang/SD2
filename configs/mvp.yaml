@@ -9,6 +9,13 @@ stages:
   - outcome
 
 pairing:
+  # Pairing anchor mode:
+  # - frame_idx: exact frame-index match; default and backward-compatible.
+  # - timestamp: nearest stress timestamp within timestamp_tolerance seconds.
+  # - route_progress: nearest stress route_progress within progress_tolerance.
+  mode: frame_idx
+  timestamp_tolerance: 0.06
+  progress_tolerance: 0.02
   key:
     - model_id
     - scenario_id
