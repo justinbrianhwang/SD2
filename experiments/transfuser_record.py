@@ -293,7 +293,22 @@ class TransFuserRuntime:
         self.ego_model = EgoModel(self.np, dt=self.config.carla_frame_rate)
         self.aug_degrees = [0]
         self.steer_damping = self.config.steer_damping
-        self.use_lidar_safe_check = True
+        # Driving-diagnosis toggles (see README "TransFuser driving debugging").
+        # The reviewer runs these live to isolate why TransFuser holds station.
+        self.use_lidar_safe_check = not bool(getattr(args, "no_lidar_safe_check", False))
+        self.debug_driving = bool(getattr(args, "debug_driving", False))
+        creep_threshold = getattr(args, "creep_threshold", None)
+        if creep_threshold is not None:
+            self.config.stuck_threshold = int(creep_threshold)
+        creep_duration = getattr(args, "creep_duration", None)
+        if creep_duration is not None:
+            self.config.creep_duration = int(creep_duration)
+        # Anti-crawl: count a frame toward the stuck detector when speed is below
+        # this threshold, and only reset when the ego is clearly moving above it.
+        # Default 0.1 m/s keeps the original "only truly stopped counts" behavior;
+        # raising it (e.g. 2.0) lets the creep controller break the cold-start
+        # limit-cycle where short predicted waypoints keep the ego crawling.
+        self.crawl_speed = float(getattr(args, "creep_speed", None) or 0.1)
         self.step = -1
         self.stuck_detector = 0
         self.forced_move = 0
@@ -459,9 +474,9 @@ class TransFuserRuntime:
             steer = float(steer) * self.steer_damping
 
         speed_value = _scalar_float(gt_velocity)
-        if speed_value < 0.1:
+        if speed_value < self.crawl_speed:
             self.stuck_detector += 1
-        elif speed_value > 0.1 and not is_stuck:
+        elif speed_value > self.crawl_speed and not is_stuck:
             self.stuck_detector = 0
             self.forced_move = 0
 
@@ -476,6 +491,28 @@ class TransFuserRuntime:
         control.steer = _scalar_float(steer)
         control.throttle = _scalar_float(throttle)
         control.brake = _scalar_float(brake)
+
+        if self.debug_driving:
+            target_point_np = model_input["target_point"].detach().cpu().numpy().reshape(-1)
+            debug_wp = pred_wp.detach().cpu().numpy()[0]
+            LOGGER.info(
+                "DRIVE step=%d speed=%.3f is_stuck=%s stuck_detector=%d forced_move=%d "
+                "emergency_stop=%s safety_pts=%d target_point=%s wp0=%s wp_last=%s "
+                "steer=%.3f throttle=%.3f brake=%.3f",
+                self.step,
+                speed_value,
+                is_stuck,
+                self.stuck_detector,
+                self.forced_move,
+                emergency_stop,
+                0 if safety_box is None else len(safety_box),
+                target_point_np.round(2).tolist(),
+                debug_wp[0].round(2).tolist() if len(debug_wp) else None,
+                debug_wp[-1].round(2).tolist() if len(debug_wp) else None,
+                control.steer,
+                control.throttle,
+                control.brake,
+            )
 
         self.update_gps_buffer(control, tick_data["compass"], tick_data["speed"])
 
@@ -1043,6 +1080,37 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--stress-severity", type=int, default=3)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--spawn-index", type=int, default=0)
+    # Driving-diagnosis toggles for the "TransFuser holds station" investigation.
+    parser.add_argument(
+        "--debug-driving",
+        action="store_true",
+        help="log per-tick driving state (speed, is_stuck, emergency_stop, waypoints, control)",
+    )
+    parser.add_argument(
+        "--no-lidar-safe-check",
+        action="store_true",
+        help="disable the LiDAR safety-box emergency brake to test if it causes station-holding",
+    )
+    parser.add_argument(
+        "--creep-threshold",
+        type=int,
+        default=None,
+        help="override config.stuck_threshold (frames of ~zero speed before creep engages)",
+    )
+    parser.add_argument(
+        "--creep-duration",
+        type=int,
+        default=None,
+        help="override config.creep_duration (frames the forced-move creep is applied)",
+    )
+    parser.add_argument(
+        "--creep-speed",
+        type=float,
+        default=None,
+        help="speed (m/s) below which a frame counts as crawling toward the creep "
+        "trigger; default 0.1 (only truly stopped). Set e.g. 2.0 with a low "
+        "--creep-threshold to break the cold-start crawl limit-cycle.",
+    )
     args = parser.parse_args(argv)
     if args.frames < 0:
         parser.error("--frames must be non-negative")

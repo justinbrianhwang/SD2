@@ -46,6 +46,21 @@ Because SD2 is architecture-agnostic, it can diagnose different E2E models under
 
 Details and the honest caveats are in [docs/example/cross_model_comparison.md](docs/example/cross_model_comparison.md).
 
+### E2E models & source repositories
+
+SD2 diagnoses six published E2E driving models. The model weights and code are
+consumed read-only through gitignored `models/` junctions; nothing in this repo
+redistributes them. Original sources:
+
+| Model | Source repository | Paper (venue) | Sensors | SD2 stages observed |
+| --- | --- | --- | --- | --- |
+| **InterFuser** | [opendilab/InterFuser](https://github.com/opendilab/InterFuser) | Shao et al., CoRL 2022 | camera + LiDAR | vision, **semantic** (object density), planning, control |
+| **TransFuser** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Chitta et al., CVPR 2021 / TPAMI 2023 | camera + LiDAR | vision, **semantic** (BEV-seg / detections), planning, control |
+| **AIM** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Chitta et al., CVPR 2021 (baseline) | camera | vision, planning, control (no semantic head) |
+| **CILRS** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Codevilla et al., ICCV 2019 (reimpl.) | camera | vision, control (no semantic / waypoints) |
+| **NEAT** | [autonomousvision/neat](https://github.com/autonomousvision/neat) | Chitta et al., ICCV 2021 | multi-camera | vision, **semantic** (BEV occupancy), planning, control |
+| **TCP** | [OpenDriveLab/TCP](https://github.com/OpenDriveLab/TCP) · weights [Thinklab-SJTU/Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo) | Wu et al., NeurIPS 2022 | camera | vision, planning, control (no semantic head) |
+
 ## Validation: Synthetic Fault Injection Benchmark
 
 SD2 includes a synthetic fault-injection benchmark for validating the diagnosis
@@ -395,6 +410,141 @@ The TransFuser and InterFuser adapters both emit Vision, Semantic, Planning,
 Control, and Outcome with the same SD2 stage names, so `sd2 analyze` and
 `sd2 fingerprint` can compare the two architectures under matched visual stress.
 
+#### Making TransFuser drive (anti-crawl creep)
+
+Out of the box in open-world closed loop (no leaderboard scenario), TransFuser —
+like the AIM/CILRS/TCP baselines — falls into a **cold-start crawl limit-cycle**:
+from a standstill the model predicts short waypoints, so `control_pid` derives a
+low desired speed and brakes; the ego briefly creeps, overshoots the tiny
+desired speed, brakes hard, and stops again. Route progress stalls near zero and
+the planning/control deviations end up measured on a near-stationary ego.
+
+The `--debug-driving` diagnosis (per-tick `speed`, `is_stuck`, `stuck_detector`,
+`forced_move`, `emergency_stop`, safety-box point count, `target_point`, and the
+first/last predicted waypoint) confirmed the cause on a live run: the LiDAR
+safety brake never fires (`emergency_stop=False`, `safety_pts=0`) and the
+`target_point`/waypoint frames are correct — the ego is simply trapped by its own
+low predicted speed. TransFuser already ships a **creep controller** (it forces
+`default_speed ≈ 4 m/s` while `is_stuck`), but its stuck trigger
+(`stuck_threshold = 1100` frames of near-zero speed) never fires during a crawl.
+
+The recorder exposes the creep so it can engage in the crawl regime:
+
+- `--creep-speed S` — count a frame toward the stuck detector when speed `< S`
+  (default `0.1` = original "only truly stopped"; set `2.5` to treat crawling as
+  stuck). The detector only resets once the ego is clearly moving above `S`.
+- `--creep-threshold N` — engage the creep after `N` sub-`creep-speed` frames
+  (overrides `config.stuck_threshold`).
+- `--creep-duration N` — how many frames each forced-move creep lasts
+  (overrides `config.creep_duration`).
+- `--debug-driving` / `--no-lidar-safe-check` remain available for diagnosis.
+
+With the settings below, TransFuser drives the route at a sustained ~4 m/s and
+completes ~85% of it (matching NEAT), so its stage deviations are measured on a
+properly moving ego:
+
+```powershell
+# clean + gaussian-noise, anti-crawl creep engaged
+python experiments/transfuser_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 120 --warmup 20 --seed 42 --checkpoint models/TransFuser/checkpoints/models_2022/transfuser --stress none --creep-speed 2.5 --creep-threshold 5 --creep-duration 60 --output data/carla/transfuser_town10_clean_seed42.jsonl --spawn-index 0
+python experiments/transfuser_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 120 --warmup 20 --seed 42 --checkpoint models/TransFuser/checkpoints/models_2022/transfuser --stress gaussian_noise --stress-severity 3 --creep-speed 2.5 --creep-threshold 5 --creep-duration 60 --output data/carla/transfuser_town10_gaussian_noise_s3_seed42.jsonl --spawn-index 0
+sd2 analyze --clean data/carla/transfuser_town10_clean_seed42.jsonl --stress data/carla/transfuser_town10_gaussian_noise_s3_seed42.jsonl --config configs/mvp.yaml --output outputs/transfuser_town10_gaussian_noise_s3 --report
+```
+
+The creep is TransFuser's own mechanism; `--creep-speed`/`--creep-threshold` only
+change *when* it engages, not the model's predictions. The same cold-start crawl
+affects AIM/CILRS/TCP (NEAT escapes it on its own); their stage-sensitivity
+deviations are still valid, but treat their route progress as a lower bound.
+
+If run (2) drives but (1) does not, the LiDAR safety box is the culprit; if
+`emergency_stop=False` throughout but `brake` stays high with sane waypoints,
+the fix is in the target-point/route frame rather than the safety logic.
+
+### Classic TransFuser-CVPR'21 Baselines
+
+SD2 also records three classic baselines from the TransFuser-CVPR'21 codebase
+using the same clean/stress pairing and SD2 stage schema:
+
+- **AIM**: camera-only imitation model; SD2 observes front-image encoder
+  features, predicted waypoints, PID control, and outcome. AIM has no semantic
+  head, so the semantic stage is absent/unobserved.
+- **CILRS**: camera-only conditional imitation model; SD2 observes front-image
+  encoder features, predicted velocity as the planning target-speed signal,
+  direct control, and outcome. CILRS has no semantic head, so the semantic stage
+  is absent/unobserved.
+- **NEAT**: attention-field model; SD2 observes multi-camera encoder features,
+  decoded BEV occupancy semantics (`bev_seg_summary`), predicted waypoints, PID
+  control, and outcome. NEAT contributes a BEV-seg semantic signal like
+  TransFuser.
+- **TCP**: Bench2Drive trajectory+control dual-branch model; SD2 observes
+  front-image backbone features, `pred_wp` waypoints, final gated control plus
+  raw trajectory/control branch actions, and outcome. TCP is fed a single front
+  camera resized/sized to `256x900` instead of the original three-camera mosaic,
+  and has no semantic head, so the semantic stage is absent/unobserved.
+
+`models/AIM/`, `models/CILRS/`, `models/NEAT/`, and `models/TCP/` are expected
+to be local gitignored junctions/checkouts. The default checkpoints are:
+
+```text
+models/AIM/aim/best_model.pth
+models/CILRS/cilrs/best_model.pth
+models/NEAT/neat/best_encoder.pth
+models/NEAT/neat/best_decoder.pth
+models/NEAT/neat/args.txt
+models/TCP/checkpoints/tcp_b2d.ckpt
+```
+
+Record and analyze AIM:
+
+```powershell
+python experiments/aim_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/AIM/aim/best_model.pth --stress none --output data/carla/aim_town10_clean_seed42.jsonl --spawn-index 0
+python experiments/aim_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/AIM/aim/best_model.pth --stress gaussian_noise --stress-severity 3 --output data/carla/aim_town10_gaussian_noise_s3_seed42.jsonl --spawn-index 0
+sd2 analyze --clean data/carla/aim_town10_clean_seed42.jsonl --stress data/carla/aim_town10_gaussian_noise_s3_seed42.jsonl --config configs/mvp.yaml --output outputs/aim_town10_gaussian_noise_s3 --report
+```
+
+Record and analyze CILRS:
+
+```powershell
+python experiments/cilrs_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/CILRS/cilrs/best_model.pth --stress none --output data/carla/cilrs_town10_clean_seed42.jsonl --spawn-index 0
+python experiments/cilrs_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/CILRS/cilrs/best_model.pth --stress gaussian_noise --stress-severity 3 --output data/carla/cilrs_town10_gaussian_noise_s3_seed42.jsonl --spawn-index 0
+sd2 analyze --clean data/carla/cilrs_town10_clean_seed42.jsonl --stress data/carla/cilrs_town10_gaussian_noise_s3_seed42.jsonl --config configs/mvp.yaml --output outputs/cilrs_town10_gaussian_noise_s3 --report
+```
+
+Record and analyze NEAT:
+
+```powershell
+python experiments/neat_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/NEAT/neat --stress none --output data/carla/neat_town10_clean_seed42.jsonl --spawn-index 0
+python experiments/neat_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/NEAT/neat --stress gaussian_noise --stress-severity 3 --output data/carla/neat_town10_gaussian_noise_s3_seed42.jsonl --spawn-index 0
+sd2 analyze --clean data/carla/neat_town10_clean_seed42.jsonl --stress data/carla/neat_town10_gaussian_noise_s3_seed42.jsonl --config configs/mvp.yaml --output outputs/neat_town10_gaussian_noise_s3 --report
+```
+
+Record and analyze TCP:
+
+```powershell
+python experiments/tcp_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/TCP/checkpoints/tcp_b2d.ckpt --planner-type only_traj --stress none --output data/carla/tcp_town10_clean_seed42.jsonl --spawn-index 0
+python experiments/tcp_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/TCP/checkpoints/tcp_b2d.ckpt --planner-type only_traj --stress gaussian_noise --stress-severity 3 --output data/carla/tcp_town10_gaussian_noise_s3_seed42.jsonl --spawn-index 0
+sd2 analyze --clean data/carla/tcp_town10_clean_seed42.jsonl --stress data/carla/tcp_town10_gaussian_noise_s3_seed42.jsonl --config configs/mvp.yaml --output outputs/tcp_town10_gaussian_noise_s3 --report
+```
+
+TCP stage mapping:
+
+- `vision`: mean-pooled TCP ResNet/perception feature as `feature`, plus
+  single-front-camera `image_mean` and `image_std` fallback.
+- `semantic`: absent/unobserved; TCP has no explicit semantic head.
+- `planning`: `pred_wp` future waypoints (`pred_len=4`), control-PID
+  `desired_speed` as `target_speed`, route command, and local target point.
+- `control`: final steer/throttle/brake after TCP planner selection, throttle
+  clamp, and brake gating, with raw trajectory-branch and control-branch
+  steer/throttle/brake preserved in `details`.
+- `outcome`: CARLA collision and lane-invasion events, route progress, and
+  optional TTC placeholder.
+
+Aggregate all E2E fingerprints:
+
+```powershell
+sd2 fingerprint --analysis-dir outputs --output outputs/e2e_fingerprint_summary.md
+sd2 aggregate --analysis-dir outputs --output outputs/e2e_aggregate.md
+```
+
 ### Calibrated thresholds on real data
 
 Real CARLA drives have natural run-to-run variation (engine non-determinism),
@@ -489,8 +639,8 @@ MVP Phase 1 through the offline stressor layer are complete:
 - hard/ambiguous synthetic benchmark profile with per-ambiguity reporting
 - reasoning metric ablations and paraphrase-robustness probe
 - `experiments/run_fault_benchmark.py` one-command validation demo
-- CARLA InterFuser and TransFuser E2E recorders plus pure SD2 adapters for
-  Vision/Semantic/Planning/Control/Outcome diagnosis
+- CARLA InterFuser, TransFuser, AIM, CILRS, and NEAT E2E recorders plus pure
+  SD2 adapters for stage-wise diagnosis
 
 The synthetic benchmark validates the SD2 diagnosis machinery on controlled
 offline logs; it does not replace real-model robustness experiments.

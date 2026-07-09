@@ -14,6 +14,11 @@ from sd2.analysis.calibration import (
     format_calibrated_threshold_table,
 )
 from sd2.analysis.pipeline import run_analysis
+from sd2.analysis.robustness_stats import (
+    aggregate_run_statistics,
+    discover_analysis_dirs,
+    format_statistical_report,
+)
 from sd2.benchmark.report import generate_benchmark_report, headline_accuracy
 from sd2.benchmark.runner import run_fault_benchmark
 from sd2.core.config import load_config
@@ -97,6 +102,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fingerprint.add_argument("--output", required=True, help="summary Markdown path")
 
+    aggregate = subparsers.add_parser(
+        "aggregate",
+        help="aggregate statistical robustness over multiple analysis runs",
+    )
+    aggregate.add_argument(
+        "--analysis-dir",
+        help="analysis directory or parent directory containing analyses",
+    )
+    aggregate.add_argument(
+        "--run",
+        action="append",
+        default=[],
+        help="explicit analysis output directory; repeat for multiple runs",
+    )
+    aggregate.add_argument("--output", required=True, help="output path base, .md, or .json")
+
     stress = subparsers.add_parser("stress", help="apply input stress to image frames")
     stress.add_argument("--input", required=True, help="input directory of PNG/JPG images")
     stress.add_argument("--config", required=True, help="path to stress YAML config")
@@ -149,6 +170,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_report(args)
     if args.command == "fingerprint":
         return _run_fingerprint(args)
+    if args.command == "aggregate":
+        return _run_aggregate(args)
     if args.command == "stress":
         return _run_stress(args)
     if args.command == "benchmark":
@@ -212,6 +235,25 @@ def _run_fingerprint(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_aggregate(args: argparse.Namespace) -> int:
+    try:
+        run_dirs = _resolve_analysis_dirs(args.analysis_dir, args.run)
+        report = aggregate_run_statistics(run_dirs)
+        markdown_path, json_path = _aggregate_output_paths(args.output)
+        report.write_json(json_path)
+        markdown_path.parent.mkdir(parents=True, exist_ok=True)
+        markdown_path.write_text(
+            format_statistical_report(report),
+            encoding="utf-8",
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(_aggregate_headline(report))
+    return 0
+
+
 def _run_stress(args: argparse.Namespace) -> int:
     try:
         run_stress(
@@ -269,6 +311,60 @@ def _calibration_output_path(raw_output: str) -> Path:
         return output
     output.mkdir(parents=True, exist_ok=True)
     return output / "calibrated_thresholds.json"
+
+
+def _resolve_analysis_dirs(
+    analysis_dir: str | None,
+    explicit_runs: list[str],
+) -> list[Path]:
+    paths: list[Path] = []
+    if analysis_dir:
+        paths.extend(discover_analysis_dirs(analysis_dir))
+    paths.extend(Path(path) for path in explicit_runs)
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path.resolve())
+        if key not in seen:
+            unique.append(path)
+            seen.add(key)
+
+    if not unique:
+        raise ValueError("aggregate requires --analysis-dir or at least one --run")
+    return unique
+
+
+def _aggregate_output_paths(raw_output: str) -> tuple[Path, Path]:
+    output = Path(raw_output)
+    suffix = output.suffix.lower()
+    if suffix == ".md":
+        return output, output.with_suffix(".json")
+    if suffix == ".json":
+        return output.with_suffix(".md"), output
+    return Path(f"{output}.md"), Path(f"{output}.json")
+
+
+def _aggregate_headline(report) -> str:
+    overall = report.mean_robustness_stat
+    stability = report.diagnosis_stability
+    modal_count = (
+        0
+        if stability.modal_stage is None
+        else stability.primary_stage_counts.get(stability.modal_stage, 0)
+    )
+    return (
+        "Overall mean robustness "
+        f"{_format_headline_float(overall.mean)} +/- "
+        f"{_format_headline_float(overall.std)}; "
+        f"primary stage = {stability.modal_stage or 'n/a'} in "
+        f"{modal_count}/{stability.n_runs} runs "
+        f"(stability {_format_headline_float(stability.stability)})"
+    )
+
+
+def _format_headline_float(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.3f}"
 
 
 if __name__ == "__main__":

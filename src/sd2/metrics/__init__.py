@@ -15,7 +15,7 @@ from sd2.metrics.reasoning import (
     ReasoningIntentOnlyMetric,
     ReasoningTextOnlyMetric,
 )
-from sd2.metrics.semantic import SemanticObjectJaccardMetric
+from sd2.metrics.semantic import SemanticCompositeMetric, SemanticObjectJaccardMetric
 from sd2.metrics.vision import VisionEmbeddingCosineMetric
 
 __all__ = [
@@ -26,6 +26,7 @@ __all__ = [
     "ReasoningIntentMismatchMetric",
     "ReasoningIntentOnlyMetric",
     "ReasoningTextOnlyMetric",
+    "SemanticCompositeMetric",
     "SemanticObjectJaccardMetric",
     "StageMetric",
     "VisionEmbeddingCosineMetric",

@@ -21,6 +21,10 @@ dist/
 outputs/*
 !outputs/README.md
 
+# Scratch/debug CARLA recordings (not deliverables)
+data/carla/tf_anticrawl*.jsonl
+data/carla/tf_debug*.jsonl
+
 # IDE / OS
 .vscode/
 .idea/

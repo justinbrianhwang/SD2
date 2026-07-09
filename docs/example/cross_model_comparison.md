@@ -39,10 +39,15 @@ architecture-level robustness fingerprint SD2 is built to expose.
    semantic-segmentation** class distribution (computed from the recorded
    `bev_seg_summary`), which does not need `mmdet`. A seg-distribution semantic
    metric should be added to SD2 so this is captured in the standard pipeline.
-2. **TransFuser driving**: in this run TransFuser mostly held station
-   (route_progress ≈ 0.01, control saturated to brake) — its planning/control
-   deviations are therefore measured on a near-stationary ego and should be
-   read as model-output sensitivity, not closed-loop driving divergence. The
-   vision and BEV-seg deviations are unaffected by this (the model still
-   processes every camera frame). Getting TransFuser to drive through the route
-   is follow-up work before the planning/control comparison is fully clean.
+2. **TransFuser driving (resolved)**: earlier runs held station
+   (route_progress ≈ 0.01, control saturated to brake), so planning/control
+   deviations were measured on a near-stationary ego. Live `--debug-driving`
+   diagnosis traced this to a cold-start crawl limit-cycle (short predicted
+   waypoints → low desired speed → brake), *not* the LiDAR safety brake
+   (`emergency_stop=False` throughout) or a wrong target-point frame. Engaging
+   TransFuser's own creep controller in the crawl regime
+   (`--creep-speed 2.5 --creep-threshold 5 --creep-duration 60`) makes it drive
+   the route at ~4 m/s and complete ~85% of it (matching NEAT), so the
+   planning/control comparison is now on a properly moving ego. See the README
+   "Making TransFuser drive (anti-crawl creep)" section. The same cold-start
+   crawl affects the AIM/CILRS/TCP camera baselines (NEAT escapes it on its own).
