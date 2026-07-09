@@ -61,6 +61,79 @@ redistributes them. Original sources:
 | **NEAT** | [autonomousvision/neat](https://github.com/autonomousvision/neat) | Chitta et al., ICCV 2021 | multi-camera | vision, **semantic** (BEV occupancy), planning, control |
 | **TCP** | [OpenDriveLab/TCP](https://github.com/OpenDriveLab/TCP) · weights [Thinklab-SJTU/Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo) | Wu et al., NeurIPS 2022 | camera | vision, planning, control (no semantic head) |
 
+## Results: live CARLA robustness diagnosis
+
+All numbers below are from **real CARLA 0.9.16 closed-loop runs** (Town10HD_Opt,
+120 frames, synchronous mode, matched spawn/route/seed per pair). Robustness is
+`1 − mean normalized stage deviation` (higher = more robust, ∈ [0, 1]). Camera
+baselines (AIM/CILRS/TCP) drive with the `--anti-crawl` aid and TransFuser with
+its creep controller, so every model completes ~82–90% of the route on a moving
+ego. `—` = stage not observable for that architecture (e.g. no semantic head).
+
+### Multi-seed statistical robustness (Gaussian noise, severity 3, seeds 42/43/44)
+
+| Model | n | Mean robustness | Primary failure stage (stability) |
+| --- | --- | --- | --- |
+| CILRS | 3 | **0.971 ± 0.005** | none crosses critical |
+| AIM | 3 | 0.946 ± 0.003 | control (3/3) |
+| NEAT | 3 | 0.898 ± 0.007 | planning (2/3) |
+| TransFuser | 3 | 0.871 ± 0.006 | planning (3/3) |
+| TCP | 3 | 0.846 ± 0.009 | planning (2/3) |
+
+Per-seed variance is tiny (std ≤ 0.009), so the diagnoses are stable across
+seeds. Generated with `sd2 aggregate` (see `outputs/multiseed/<model>/`).
+
+### Cross-stress stage robustness (severity 3, seed 42, moving ego)
+
+Same model under four input stresses — this is the architecture-level robustness
+fingerprint (RQ3: *where* does each model first collapse?).
+
+| Model | Stress | Vision | Semantic | Planning | Control | Mean |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| AIM | gaussian_noise | 0.961 | — | 0.959 | 0.920 | 0.947 |
+| AIM | motion_blur | 0.877 | — | **0.672** | 0.809 | 0.786 |
+| AIM | brightness | 0.978 | — | 0.971 | 0.942 | 0.964 |
+| AIM | fog | 0.969 | — | 0.941 | 0.926 | 0.945 |
+| CILRS | gaussian_noise | 0.987 | — | — | 0.967 | 0.977 |
+| CILRS | motion_blur | **0.549** | — | — | 0.641 | **0.595** |
+| CILRS | brightness | 0.996 | — | — | 0.976 | 0.986 |
+| CILRS | fog | 0.957 | — | — | 0.897 | 0.927 |
+| InterFuser | gaussian_noise | 0.974 | **0.767** | 0.927 | 0.940 | 0.902 |
+| InterFuser | motion_blur | 0.952 | **0.773** | 0.885 | 0.981 | 0.898 |
+| InterFuser | brightness | 0.989 | 0.873 | 0.954 | 0.956 | 0.943 |
+| InterFuser | fog | 0.991 | 0.807 | 0.958 | 0.986 | 0.935 |
+| NEAT | gaussian_noise | 0.929 | 0.944 | 0.838 | 0.910 | 0.905 |
+| NEAT | motion_blur | 0.790 | 0.949 | **0.423** | 0.854 | 0.754 |
+| NEAT | brightness | 0.954 | 0.963 | 0.876 | 0.908 | 0.925 |
+| NEAT | fog | 0.948 | 0.955 | 0.854 | 0.878 | 0.909 |
+| TCP | gaussian_noise | 0.898 | — | 0.764 | 0.908 | 0.857 |
+| TCP | motion_blur | 0.874 | — | 0.753 | 0.956 | 0.861 |
+| TCP | brightness | 0.924 | — | 0.796 | 0.963 | 0.894 |
+| TCP | fog | 0.947 | — | 0.828 | 0.969 | 0.915 |
+| TransFuser | gaussian_noise | 0.879 | 0.914 | 0.766 | 0.898 | 0.864 |
+| TransFuser | motion_blur | **0.680** | 0.913 | **0.538** | 0.919 | 0.763 |
+| TransFuser | brightness | 0.961 | 0.955 | 0.901 | 0.906 | 0.931 |
+| TransFuser | fog | 0.965 | 0.953 | 0.909 | 0.965 | 0.948 |
+
+**What the numbers show (RQ3 — architectures fail at different stages):**
+
+- **Motion blur is the harshest stress** and it collapses the **planning** stage
+  hardest: NEAT 0.423, TransFuser 0.538, AIM 0.672, TCP 0.753. Fog and
+  brightness are mild (most stages > 0.9).
+- **CILRS is the least robust to motion blur** — its single-frame image feature
+  degrades (vision 0.549) and in closed loop the run crashed (47 collisions, 0%
+  route). Under gaussian/brightness it is otherwise the *most* robust model.
+- **InterFuser's weak point is semantic** (0.767–0.873 across all four stresses)
+  on top of a robust encoder — its object-density decoder is the fragile link.
+- **NEAT's BEV-seg semantic stays robust** (0.944–0.963) under every stress
+  while its planning is sensitive — perception is stable, trajectory is not.
+- **TransFuser** is vision- and planning-sensitive (both drop under noise/blur),
+  consistent with a fused image+LiDAR feature that is itself perturbation-prone.
+- **AIM/TCP** keep control robust; their fragility is in planning under blur.
+
+Regenerate any of these with `sd2 analyze` + `sd2 fingerprint` / `sd2 aggregate`
+(commands in the model sections below).
+
 ## Validation: Synthetic Fault Injection Benchmark
 
 SD2 includes a synthetic fault-injection benchmark for validating the diagnosis
