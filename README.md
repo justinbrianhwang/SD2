@@ -168,10 +168,17 @@ spawn produced a drivable run (best NEAT probe ≤ 5% with frequent collisions).
   robustness falls to 0.52/0.58 — noise that is survivable in Town10HD is not in
   Town01.
 
-For Town03/Town05 the stage deviations are still recorded but on non-driving
-egos, so they are model-output sensitivity, not closed-loop drives, and are
-omitted from the driving table above. Real closed-loop driving on those maps
-needs in-distribution checkpoints or the leaderboard scenario framework.
+**Reading the OOD cells honestly.** SD2 still computes stage deviations for
+Town03/Town05, but on egos that never complete the route, so those numbers are
+raw model-output sensitivity to the perturbation, **not** closed-loop robustness
+— which is why they are marked OOD and kept out of the driving comparison. The
+result here is diagnostic rather than a driving score: SD2 surfaces *that* these
+checkpoints fall out of distribution on Town03/Town05, and — on the maps that do
+drive — *where* each architecture first breaks. Note also that a single seed and
+spawn is a thin sample per town; the driving percentages are indicative, not
+leaderboard numbers. Recovering real closed-loop driving on the OOD maps needs
+in-distribution checkpoints or the CARLA leaderboard scenario framework, not more
+spawn or creep tuning.
 
 Regenerate any of these with `sd2 analyze` + `sd2 fingerprint` / `sd2 aggregate`
 (commands in the model sections below).
