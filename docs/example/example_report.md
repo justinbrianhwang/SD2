@@ -11,7 +11,7 @@
 
 ## Summary Diagnosis
 
-Under Gaussian Noise severity 3, the openemma model completed 92.0% of the route and experienced a collision and a lane invasion. The Reasoning stage showed the earliest critical deviation at t=1.500s (frame 15), preceding downstream Planning and Control deviation and the final driving failure. Downstream deviation increases followed the Reasoning onset in the order Planning (+0.080) and Control (+0.088). The primary_failure_stage label is Reasoning. Upstream perception did not show an earlier critical deviation; reasoning-stage deviation was followed by planning/control deviation.
+Under Gaussian Noise severity 3, the openemma model completed 92.0% of the route and experienced a collision and a lane invasion. The Reasoning stage showed the earliest critical deviation at t=1.500s (frame 15), preceding downstream Planning and Control deviation and the driving-failure event. Downstream deviation increases followed the Reasoning onset in the order Planning (+0.080) and Control (+0.088). The primary_failure_stage label is Reasoning. Upstream perception did not show an earlier critical deviation; reasoning-stage deviation was followed by planning/control deviation.
 
 Diagnosis type: temporal-correlational; this report identifies the earliest-collapsing stage by timing, not mechanistic proof.
 

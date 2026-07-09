@@ -213,7 +213,7 @@ def build_summary_diagnosis(artifacts: AnalysisArtifacts) -> str:
     route_text = _format_progress(stress_outcome.get("route_progress"))
     outcome_sentence = (
         f"Under {stress_label}, the {meta['model_id']} model completed "
-        f"{route_text} of the route and {_failure_phrase(stress_outcome)}."
+        f"{route_text} of the route and {_failure_phrase(stress_outcome, diagnosis)}."
     )
 
     first_critical = _first_onset(collapse_times, "critical")
@@ -234,9 +234,9 @@ def build_summary_diagnosis(artifacts: AnalysisArtifacts) -> str:
             "critical",
         )
         failure_phrase = (
-            "the final driving failure"
+            "the driving-failure event"
             if diagnosis.get("driving_failure") is True
-            else "no final driving failure"
+            else "no driving-failure event"
         )
         first_sentence = (
             f"The {_display_stage(stage)} stage showed the earliest critical "
@@ -265,6 +265,7 @@ def build_summary_diagnosis(artifacts: AnalysisArtifacts) -> str:
         primary=str(primary) if primary else None,
         collapse_times=collapse_times,
         stage_means=stage_means,
+        fallback_used=diagnosis.get("fallback_used"),
     )
 
     return " ".join(
@@ -550,17 +551,39 @@ def _stress_label(meta: dict[str, str]) -> str:
     return label
 
 
-def _failure_phrase(stress_outcome: dict[str, Any]) -> str:
+def _failure_phrase(
+    stress_outcome: dict[str, Any],
+    diagnosis: dict[str, Any] | None = None,
+) -> str:
+    # Consider events that occurred at any point during the run, not only the
+    # final frame: transient events (e.g. a lane invasion) can clear by the last
+    # frame yet still be real driving failures recorded by the diagnosis.
+    evidence = " ".join(
+        (diagnosis or {}).get("driving_failure_evidence") or []
+    ).lower()
+    collision = (
+        stress_outcome.get("collision") is True or "collision occurred" in evidence
+    )
+    lane_invasion = (
+        stress_outcome.get("lane_invasion") is True
+        or "lane invasion occurred" in evidence
+    )
+
     failures = []
-    if stress_outcome.get("collision") is True:
+    if collision:
         failures.append("a collision")
-    if stress_outcome.get("lane_invasion") is True:
+    if lane_invasion:
         failures.append("a lane invasion")
     if not failures:
         return "did not record a collision or lane invasion"
-    if len(failures) == 1:
-        return f"experienced {failures[0]}"
-    return f"experienced {failures[0]} and {failures[1]}"
+
+    joined = failures[0] if len(failures) == 1 else f"{failures[0]} and {failures[1]}"
+    final_clean = (
+        stress_outcome.get("collision") is not True
+        and stress_outcome.get("lane_invasion") is not True
+    )
+    during = " during the run" if final_clean else ""
+    return f"experienced {joined}{during}"
 
 
 def _propagation_order_sentence(
@@ -716,6 +739,7 @@ def _interpretation_sentence(
     primary: str | None,
     collapse_times: dict[str, Any],
     stage_means: dict[str, float],
+    fallback_used: str | None = None,
 ) -> str:
     if primary is None:
         return "The configured thresholds did not identify a pipeline collapse."
@@ -742,11 +766,38 @@ def _interpretation_sentence(
             f"Downstream warning deviations followed {_display_stage(primary)} in "
             f"{_join_words([_display_stage(stage) for stage in downstream])}."
         )
+
+    # No downstream warning followed the primary stage. Explain the selection
+    # honestly, according to how the diagnosis actually chose the primary stage.
+    primary_reached_critical = (
+        _dict(collapse_times.get(primary)).get("critical") is not None
+    )
+    if fallback_used is None and primary_reached_critical:
+        return (
+            f"{_display_stage(primary)} was the earliest stage to cross the "
+            "critical deviation threshold, while downstream stages stayed below "
+            "the warning level."
+        )
+
+    # A fallback policy selected the primary stage. Only claim it had the
+    # highest mean deviation when that is actually true across observed stages.
     mean_score = stage_means.get(primary)
+    observed_means = {
+        stage: score for stage, score in stage_means.items() if score is not None
+    }
+    is_highest = bool(observed_means) and observed_means.get(primary) == max(
+        observed_means.values()
+    )
+    if is_highest:
+        return (
+            f"{_display_stage(primary)} had the highest observed mean deviation "
+            f"({_format_optional_float(mean_score)}) across the pipeline stages."
+        )
+    fallback_text = f" ({fallback_used})" if fallback_used else ""
     return (
-        f"{_display_stage(primary)} had the highest observed mean deviation "
-        f"({_format_optional_float(mean_score)}) among stages considered by "
-        "the fallback policy."
+        f"{_display_stage(primary)} was selected by the fallback policy"
+        f"{fallback_text} with a mean deviation of "
+        f"{_format_optional_float(mean_score)}."
     )
 
 

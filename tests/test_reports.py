@@ -9,9 +9,71 @@ import pytest
 
 from sd2.analysis.pipeline import run_analysis
 from sd2.reports.markdown import (
+    _failure_phrase,
+    _interpretation_sentence,
     aggregate_fingerprint_files,
     generate_fingerprint_summary,
 )
+
+
+def test_failure_phrase_reports_midrun_event_even_if_final_frame_clean() -> None:
+    # A lane invasion occurred mid-run but the final frame is clean. The phrase
+    # must still report the event (consistent with driving_failure=True) rather
+    # than claim no lane invasion.
+    stress_outcome = {"collision": False, "lane_invasion": False}
+    diagnosis = {
+        "driving_failure": True,
+        "driving_failure_evidence": [
+            "Lane invasion occurred in stress run at t=6.300s (frame 126)."
+        ],
+    }
+    phrase = _failure_phrase(stress_outcome, diagnosis)
+    assert "lane invasion" in phrase
+    assert "during the run" in phrase
+    assert "did not record" not in phrase
+
+
+def test_failure_phrase_clean_run_reports_no_failure() -> None:
+    phrase = _failure_phrase(
+        {"collision": False, "lane_invasion": False},
+        {"driving_failure": False, "driving_failure_evidence": []},
+    )
+    assert phrase == "did not record a collision or lane invasion"
+
+
+def test_interpretation_critical_policy_does_not_claim_fallback_or_highest_mean() -> None:
+    # Primary crossed critical (not a fallback), and another stage has a higher
+    # mean deviation. The sentence must not claim "fallback policy" or that the
+    # primary had the highest mean deviation.
+    collapse_times = {
+        "planning": {"critical": {"frame_idx": 86, "timestamp": 4.3, "score": 1.0}},
+        "control": {"warning": None, "critical": None},
+    }
+    stage_means = {"planning": 0.032, "control": 0.125}
+    sentence = _interpretation_sentence(
+        primary="planning",
+        collapse_times=collapse_times,
+        stage_means=stage_means,
+        fallback_used=None,
+    )
+    assert "fallback" not in sentence.lower()
+    assert "highest observed mean" not in sentence.lower()
+    assert "earliest stage to cross the critical" in sentence
+
+
+def test_interpretation_fallback_only_claims_highest_mean_when_true() -> None:
+    # Fallback selected planning, but control has the higher mean, so the
+    # sentence must not claim planning had the highest mean deviation.
+    collapse_times = {"planning": {"critical": None}, "control": {"critical": None}}
+    stage_means = {"planning": 0.032, "control": 0.125}
+    sentence = _interpretation_sentence(
+        primary="planning",
+        collapse_times=collapse_times,
+        stage_means=stage_means,
+        fallback_used="highest_mean_deviation",
+    )
+    assert "highest observed mean" not in sentence.lower()
+    assert "fallback policy" in sentence.lower()
 
 
 def test_report_generation_from_sample_analysis_artifacts(tmp_path: Path) -> None:
