@@ -277,6 +277,7 @@ def compute_propagation_analysis(
     ratio_cap = float(diagnosis_config.get("propagation_ratio_cap", 10.0))
     downstream_window = int(diagnosis_config.get("downstream_window", 5))
     downstream_min_delta = float(diagnosis_config.get("downstream_min_delta", 0.0))
+    onset_persistence = int(diagnosis_config.get("onset_persistence_frames", 1))
 
     if lag < 0:
         raise ValueError("diagnosis.propagation_lag must be non-negative")
@@ -286,12 +287,19 @@ def compute_propagation_analysis(
         raise ValueError("diagnosis.propagation_ratio_cap must be positive")
     if downstream_window < 1:
         raise ValueError("diagnosis.downstream_window must be at least 1")
+    if onset_persistence < 1:
+        raise ValueError("diagnosis.onset_persistence_frames must be at least 1")
 
     stage_order = _configured_stage_order(config)
     series_by_stage = _stage_series(deviation_table)
 
     collapse_onsets = [
-        _compute_collapse_onset(stage, series_by_stage.get(stage, []), threshold_set)
+        _compute_collapse_onset(
+            stage,
+            series_by_stage.get(stage, []),
+            threshold_set,
+            onset_persistence,
+        )
         for stage in stage_order
     ]
     onset_by_stage = {onset.stage: onset for onset in collapse_onsets}
@@ -515,21 +523,30 @@ def _compute_collapse_onset(
     stage: Stage,
     points: list[_StagePoint],
     thresholds: ThresholdSet,
+    persistence: int = 1,
 ) -> StageCollapseOnset:
     stage_thresholds = thresholds.for_stage(stage)
     return StageCollapseOnset(
         stage=stage,
-        warning=_first_onset(points, stage_thresholds.warning),
-        critical=_first_onset(points, stage_thresholds.critical),
+        warning=_first_onset(points, stage_thresholds.warning, persistence),
+        critical=_first_onset(points, stage_thresholds.critical, persistence),
     )
 
 
 def _first_onset(
     points: list[_StagePoint],
     threshold: float,
+    persistence: int = 1,
 ) -> CollapsePoint | None:
-    for point in points:
-        if point.score >= threshold:
+    # A collapse onset requires the deviation to stay at or above the threshold
+    # for ``persistence`` consecutive frames, so a single-frame outlier spike is
+    # not treated as a stage collapse. The onset is the first frame of the run.
+    window = max(1, persistence)
+    for start in range(len(points)):
+        if start + window > len(points):
+            break
+        if all(points[start + offset].score >= threshold for offset in range(window)):
+            point = points[start]
             return CollapsePoint(
                 frame_idx=point.frame_idx,
                 timestamp=point.timestamp,

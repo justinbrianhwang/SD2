@@ -211,6 +211,27 @@ logs are Observability Tier 0/1. Clean and stress runs are designed to pair by
 `frame_idx`; severe weather or control noise can still make the closed-loop
 trajectory diverge, so frame pairing is an alignment convention for analysis.
 
+### Calibrated thresholds on real data
+
+Real CARLA drives have natural run-to-run variation (engine non-determinism),
+so repeated clean runs give a meaningful clean-clean baseline. Record several
+clean runs and calibrate per-stage thresholds, then analyze the stress pair
+with them:
+
+```powershell
+sd2 calibrate --clean data/carla/calib/clean_rep1.jsonl --clean data/carla/calib/clean_rep2.jsonl --clean data/carla/calib/clean_rep3.jsonl --config configs/mvp.yaml --output data/carla/calib/calibrated_thresholds.json
+sd2 analyze --clean data/carla/town10_clean_seed42.jsonl --stress data/carla/town10_control_noise_s3_seed42.jsonl --config configs/mvp.yaml --thresholds data/carla/calib/calibrated_thresholds.json --output outputs/carla_control_noise_s3_calibrated --report
+```
+
+On the bundled `control_noise` example this matters: the static `0.4/0.7`
+thresholds are far above the real clean-clean deviation (Planning/Control
+critical calibrate to about `0.06-0.07`), and a single-frame Planning spike
+would otherwise be mistaken for the primary failure. With calibrated thresholds
+plus the `onset_persistence_frames` requirement (a collapse onset must persist
+for several consecutive frames, filtering outlier spikes), the diagnosis
+correctly identifies **Control** — the stage that was actually perturbed — as
+the primary failure stage.
+
 ## Expected Outputs
 
 The demo writes:

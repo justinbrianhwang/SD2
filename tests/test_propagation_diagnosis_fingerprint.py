@@ -8,11 +8,32 @@ from sd2.analysis.fingerprint import (
     aggregate_robustness_fingerprints,
     compute_robustness_fingerprint,
 )
-from sd2.analysis.propagation import compute_propagation_analysis
+from sd2.analysis.propagation import _first_onset, _StagePoint, compute_propagation_analysis
 from sd2.core.config import SD2Config
 from sd2.core.run import RunLog, pair_runs
 from sd2.core.schema import FrameLog, RunMetadata
 from sd2.core.stage import Stage
+
+
+def _points(scores: list[float]) -> list[_StagePoint]:
+    return [_StagePoint(frame_idx=i, timestamp=i * 0.1, score=s) for i, s in enumerate(scores)]
+
+
+def test_onset_persistence_rejects_single_frame_spike() -> None:
+    # A one-frame spike above threshold must not count as an onset when
+    # persistence requires 3 consecutive frames.
+    scores = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    assert _first_onset(_points(scores), threshold=0.5, persistence=3) is None
+    # With persistence=1 (legacy behavior) the spike is an onset at frame 2.
+    onset = _first_onset(_points(scores), threshold=0.5, persistence=1)
+    assert onset is not None and onset.frame_idx == 2
+
+
+def test_onset_persistence_accepts_sustained_crossing() -> None:
+    # Sustained crossing from frame 3 onward is a real onset at frame 3.
+    scores = [0.0, 0.1, 0.2, 0.6, 0.7, 0.8]
+    onset = _first_onset(_points(scores), threshold=0.5, persistence=3)
+    assert onset is not None and onset.frame_idx == 3
 
 
 def test_reasoning_first_collapse_propagates_to_planning_and_control() -> None:

@@ -54,3 +54,6 @@ diagnosis:
   noise_floor: 0.05
   propagation_ratio_cap: 10.0
   route_progress_drop_threshold: 0.05
+  # A collapse onset requires the deviation to stay at/above threshold for this
+  # many consecutive frames, so single-frame outlier spikes are not counted.
+  onset_persistence_frames: 3
