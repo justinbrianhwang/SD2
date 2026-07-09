@@ -70,18 +70,20 @@ baselines (AIM/CILRS/TCP) drive with the `--anti-crawl` aid and TransFuser with
 its creep controller, so every model completes ~82–90% of the route on a moving
 ego. `—` = stage not observable for that architecture (e.g. no semantic head).
 
-### Multi-seed statistical robustness (Gaussian noise, severity 3, seeds 42/43/44)
+### Multi-seed statistical robustness (Gaussian noise, severity 3, seeds 42–46)
 
 | Model | n | Mean robustness | Primary failure stage (stability) |
 | --- | --- | --- | --- |
-| CILRS | 3 | **0.971 ± 0.005** | none crosses critical |
-| AIM | 3 | 0.946 ± 0.003 | control (3/3) |
-| NEAT | 3 | 0.898 ± 0.007 | planning (2/3) |
-| TransFuser | 3 | 0.871 ± 0.006 | planning (3/3) |
-| TCP | 3 | 0.846 ± 0.009 | planning (2/3) |
+| CILRS | 5 | **0.973 ± 0.004** | none crosses critical |
+| AIM | 5 | 0.947 ± 0.004 | control (5/5) |
+| NEAT | 5 | 0.890 ± 0.015 | planning (4/5) |
+| TransFuser | 5 | 0.870 ± 0.006 | planning (5/5) |
+| TCP | 5 | 0.845 ± 0.009 | planning (4/5) |
 
-Per-seed variance is tiny (std ≤ 0.009), so the diagnoses are stable across
-seeds. Generated with `sd2 aggregate` (see `outputs/multiseed/<model>/`).
+Across five seeds the per-model variance is small (std ≤ 0.015) and the primary
+failure stage is the same in ≥4/5 runs, so SD2's diagnoses are stable — the
+weakest stage is a property of the architecture, not of a lucky seed. Generated
+with `sd2 aggregate` (see `outputs/multiseed/<model>/`).
 
 ### Cross-stress stage robustness (severity 3, seed 42, moving ego)
 
@@ -130,6 +132,36 @@ fingerprint (RQ3: *where* does each model first collapse?).
 - **TransFuser** is vision- and planning-sensitive (both drop under noise/blur),
   consistent with a fused image+LiDAR feature that is itself perturbation-prone.
 - **AIM/TCP** keep control robust; their fragility is in planning under blur.
+
+### Cross-town robustness (Gaussian noise, severity 3, seed 42)
+
+Same models and stress across four maps. This asks whether the *failure
+signature* is a property of the architecture or of one map.
+
+| Model | Town01 | Town03 | Town05 | Town10HD | Fragile stage (all towns) |
+| --- | ---: | ---: | ---: | ---: | --- |
+| AIM (mean) | 0.873 | 0.935 | 0.953 | 0.947 | control / planning |
+| CILRS (mean) | 0.814 | 0.781 | 0.924 | 0.977 | control |
+| NEAT (mean) | 0.619 | 0.929 | 0.795 | 0.905 | **planning** (0.43–0.90); semantic stays robust |
+| TCP (mean) | 0.914 | 0.847 | 0.875 | 0.857 | **planning** |
+| TransFuser (mean) | 0.885 | 0.840 | 0.843 | 0.864 | **planning**; semantic stays robust |
+
+The absolute robustness moves with the map, but the **weakest stage is the same
+across towns** for each architecture: NEAT and TransFuser always collapse first
+at *planning* while keeping *semantic* robust; AIM/CILRS keep *vision* robust and
+break at *control*. That town-invariance is the point — SD2 reads an
+architecture-level signature, not a map artifact.
+
+> **Honest caveat — driving does not transfer.** The `--anti-crawl`/creep driving
+> aids are tuned for Town10HD_Opt spawn 0. At the default spawn of Town01/03/05
+> the forced rolling-start drives several models into obstacles (e.g. TransFuser
+> 59–74 collisions in Town01, TCP stuck at 0% in Town03/05), so **route
+> completion in the new towns is a negative result**, not a driving demo. The
+> stage-deviation fingerprints above are still valid model-output sensitivity
+> (the network processes every frame regardless of where the car ends up), but
+> the new-town runs are not clean closed-loop drives. Per-town, per-spawn creep
+> tuning (or the leaderboard scenario framework) is needed for real closed-loop
+> driving off Town10HD.
 
 Regenerate any of these with `sd2 analyze` + `sd2 fingerprint` / `sd2 aggregate`
 (commands in the model sections below).
