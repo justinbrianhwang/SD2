@@ -21,10 +21,9 @@ dist/
 outputs/*
 !outputs/README.md
 
-# Scratch/debug CARLA recordings (not deliverables)
-data/carla/tf_anticrawl*.jsonl
-data/carla/tf_debug*.jsonl
-data/carla/*_test.jsonl
+# Raw CARLA run recordings (regenerable; results are summarized in the README).
+# Calibration fixtures under data/carla/calib/ stay tracked (not matched here).
+data/carla/*.jsonl
 
 # IDE / OS
 .vscode/
