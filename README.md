@@ -296,6 +296,83 @@ The script logs first-tick sensor shapes, model input tensor shapes, and model
 output shapes before recording frames, which is the first place to look if a
 live CARLA run has an input-shape mismatch.
 
+### TransFuser
+
+SD2 also records TransFuser as a second E2E architecture for RQ3-style
+cross-architecture failure comparison: clean/stress runs can be collected with
+the same CARLA town, seed, route, frame count, and visual stressor, then
+compared against InterFuser fingerprints using the same SD2 stage schema.
+
+The recorder is
+[experiments/transfuser_record.py](experiments/transfuser_record.py); the
+CARLA-free conversion module is
+[src/sd2/adapters/transfuser_adapter.py](src/sd2/adapters/transfuser_adapter.py).
+`models/TransFuser/` is expected to be a local gitignored junction to the
+TransFuser checkout. The default checkpoint directory is:
+
+```text
+models/TransFuser/checkpoints/models_2022/transfuser
+```
+
+The script follows the verified TransFuser load recipe: it prepends only
+`models/TransFuser/TransFuser_UI_V2/transfuser/team_code_transfuser`, imports
+`GlobalConfig` and `LidarCenterNet`, reads `args.txt`, loads
+`model_seed1_39.pth`, strips the `module.` DDP prefix, and uses the installed
+standard `timm` package. It does not prepend InterFuser's vendored `timm` path;
+`mmcv` and `torch_scatter` remain optional because the TransFuser model file has
+fallbacks for this inference path.
+
+The recorder attaches the TransFuser sensor rig from the submission agent:
+front/left/right RGB cameras `960x480` fov `120` at yaw `0/-60/+60`, IMU, GNSS,
+a speedometer measurement derived from ego velocity, and lidar `ray_cast` at the
+configured lidar pose for the `transFuser` backbone. Visual stressors are
+applied to the RGB camera frames before TransFuser preprocessing, target-point
+image generation, `forward_ego`, and `control_pid`.
+
+Record a clean TransFuser run:
+
+```powershell
+python experiments/transfuser_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/TransFuser/checkpoints/models_2022/transfuser --stress none --output data/carla/transfuser_town10_clean_seed42.jsonl --spawn-index 0
+```
+
+Record a matched Gaussian-noise stress run with the same seed, town, frame
+count, and spawn index:
+
+```powershell
+python experiments/transfuser_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/TransFuser/checkpoints/models_2022/transfuser --stress gaussian_noise --stress-severity 3 --output data/carla/transfuser_town10_gaussian_noise_s3_seed42.jsonl --spawn-index 0
+```
+
+Analyze the pair:
+
+```powershell
+sd2 analyze --clean data/carla/transfuser_town10_clean_seed42.jsonl --stress data/carla/transfuser_town10_gaussian_noise_s3_seed42.jsonl --config configs/mvp.yaml --output outputs/transfuser_town10_gaussian_noise_s3 --report
+```
+
+Aggregate InterFuser and TransFuser fingerprints for cross-model comparison:
+
+```powershell
+sd2 fingerprint --analysis-dir outputs --output outputs/e2e_fingerprint_summary.md
+```
+
+Stage mapping:
+
+- `vision`: TransFuser fused image/LiDAR backbone embedding before the waypoint
+  GRU as `feature` for `embedding_cosine`, plus three-camera `image_mean` and
+  `image_std` fallback.
+- `semantic`: `rotated_bb` detections from the CenterNet branch, converted to
+  vehicle objects, per-class counts, occupancy/density summary, confidence
+  summary, and optional BEV segmentation summary.
+- `planning`: `pred_wp` waypoints, target-speed proxy from waypoint spacing,
+  route command, local target point, and stuck-state flag.
+- `control`: `LidarCenterNet.control_pid` steer, throttle, and brake after the
+  TransFuser action-repeat/stuck/safety logic.
+- `outcome`: CARLA collision and lane-invasion events, route progress, and
+  optional TTC placeholder.
+
+The TransFuser and InterFuser adapters both emit Vision, Semantic, Planning,
+Control, and Outcome with the same SD2 stage names, so `sd2 analyze` and
+`sd2 fingerprint` can compare the two architectures under matched visual stress.
+
 ### Calibrated thresholds on real data
 
 Real CARLA drives have natural run-to-run variation (engine non-determinism),
@@ -390,7 +467,7 @@ MVP Phase 1 through the offline stressor layer are complete:
 - hard/ambiguous synthetic benchmark profile with per-ambiguity reporting
 - reasoning metric ablations and paraphrase-robustness probe
 - `experiments/run_fault_benchmark.py` one-command validation demo
-- CARLA InterFuser E2E recorder and pure InterFuser-to-SD2 adapter for
+- CARLA InterFuser and TransFuser E2E recorders plus pure SD2 adapters for
   Vision/Semantic/Planning/Control/Outcome diagnosis
 
 The synthetic benchmark validates the SD2 diagnosis machinery on controlled
