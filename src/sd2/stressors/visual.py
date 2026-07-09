@@ -11,6 +11,7 @@ Severity mappings:
 - ``jpeg_compression``: JPEG quality ``[70, 50, 35, 20, 10]``.
 - ``low_light``: multiplicative darkness factor
   ``[0.85, 0.70, 0.55, 0.40, 0.25]`` plus slight Gaussian noise.
+- ``fog``: white veil blend density ``[0.08, 0.16, 0.28, 0.42, 0.60]``.
 """
 
 from __future__ import annotations
@@ -261,6 +262,37 @@ class LowLightStressor(ImageStressor):
         output = _clip_uint8(base + noise)
         self._set_report({"params": params})
         return output
+
+
+@register_stressor("fog")
+class FogStressor(ImageStressor):
+    """Blend the image toward a white haze with severity density 0.08..0.60."""
+
+    DENSITY_BY_SEVERITY = {
+        1: 0.08,
+        2: 0.16,
+        3: 0.28,
+        4: 0.42,
+        5: 0.60,
+    }
+
+    def params_for_severity(self, severity: int) -> dict[str, Any]:
+        severity_value = validate_severity(severity)
+        return {"density": self.DENSITY_BY_SEVERITY[severity_value]}
+
+    def apply_image(
+        self,
+        image: np.ndarray,
+        severity: int,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        del rng
+        params = self.params_for_severity(severity)
+        base = _float_image(image)
+        haze = np.full_like(base, 255.0)
+        output = base * (1.0 - params["density"]) + haze * params["density"]
+        self._set_report({"params": params})
+        return _clip_uint8(output)
 
 
 def _brightness_sign(direction: str, rng: np.random.Generator) -> int:

@@ -235,6 +235,67 @@ logs are Observability Tier 0/1. Clean and stress runs are designed to pair by
 `frame_idx`; severe weather or control noise can still make the closed-loop
 trajectory diverge, so frame pairing is an alignment convention for analysis.
 
+## E2E Model Diagnosis (InterFuser)
+
+SD2 can record InterFuser, an E2E camera+lidar model, in CARLA and emit Tier
+2/3 logs with Vision, Semantic, Planning, Control, and Outcome populated. The
+recorder is [experiments/interfuser_record.py](experiments/interfuser_record.py);
+the CARLA-free conversion module is
+[src/sd2/adapters/interfuser_adapter.py](src/sd2/adapters/interfuser_adapter.py).
+
+`models/InterFuser/` is expected to be a local junction to the InterFuser repo
+and remains gitignored. The script applies the verified inference preamble
+internally: it stubs `imgaug`, prepends `models/InterFuser/interfuser` so the
+vendored `timm 0.4.13` wins, and prepends the InterFuser `leaderboard` and
+`scenario_runner` paths. The default checkpoint is:
+
+```text
+F:/coding/Autonomous Vehicle/MARSHAL/Models/InterFuser_ckpt/interfuser.pth
+```
+
+The recorder attaches the InterFuser sensor rig from the leaderboard agent:
+front RGB `800x600` fov `100`, left/right RGB `400x300` yaw `-60/+60`, lidar
+`ray_cast` yaw `-90`, IMU, GNSS, and a speedometer measurement derived from the
+ego velocity. Visual stressors are applied to RGB frames before InterFuser
+preprocessing and inference, so the perturbation can propagate through
+semantic prediction, planning, control, and outcome.
+
+Record a clean InterFuser run:
+
+```powershell
+python experiments/interfuser_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint "F:/coding/Autonomous Vehicle/MARSHAL/Models/InterFuser_ckpt/interfuser.pth" --stress none --output data/carla/interfuser_town10_clean_seed42.jsonl --spawn-index 0
+```
+
+Record a matched Gaussian-noise stress run with the same seed, town, frame
+count, and spawn index:
+
+```powershell
+python experiments/interfuser_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint "F:/coding/Autonomous Vehicle/MARSHAL/Models/InterFuser_ckpt/interfuser.pth" --stress gaussian_noise --stress-severity 3 --output data/carla/interfuser_town10_gaussian_noise_s3_seed42.jsonl --spawn-index 0
+```
+
+Analyze the pair:
+
+```powershell
+sd2 analyze --clean data/carla/interfuser_town10_clean_seed42.jsonl --stress data/carla/interfuser_town10_gaussian_noise_s3_seed42.jsonl --config configs/mvp.yaml --output outputs/interfuser_town10_gaussian_noise_s3 --report
+```
+
+Stage mapping:
+
+- `vision`: mean-pooled InterFuser `traffic_feature`/BEV feature as `feature`
+  for `embedding_cosine`, plus front-camera `image_mean` and `image_std`
+  fallback.
+- `semantic`: tracked `traffic_meta` object counts/classes, occupied-cell
+  density, junction probability, traffic-light score, and stop-sign score.
+- `planning`: predicted waypoints, controller target speed, route command, and
+  local target point.
+- `control`: `InterfuserController` steer, throttle, and brake.
+- `outcome`: CARLA collision and lane-invasion events, route progress, and
+  optional TTC placeholder.
+
+The script logs first-tick sensor shapes, model input tensor shapes, and model
+output shapes before recording frames, which is the first place to look if a
+live CARLA run has an input-shape mismatch.
+
 ### Calibrated thresholds on real data
 
 Real CARLA drives have natural run-to-run variation (engine non-determinism),
@@ -284,6 +345,7 @@ Visual stressors operate on `HxWx3` RGB `uint8` images and write the same filena
 
 - `gaussian_noise`
 - `motion_blur`
+- `fog`
 - `brightness_shift`
 - `contrast_shift`
 - `jpeg_compression`
@@ -328,8 +390,11 @@ MVP Phase 1 through the offline stressor layer are complete:
 - hard/ambiguous synthetic benchmark profile with per-ambiguity reporting
 - reasoning metric ablations and paraphrase-robustness probe
 - `experiments/run_fault_benchmark.py` one-command validation demo
+- CARLA InterFuser E2E recorder and pure InterFuser-to-SD2 adapter for
+  Vision/Semantic/Planning/Control/Outcome diagnosis
 
-CARLA integration and model-specific closed-loop adapters remain out of scope for the offline MVP. The synthetic benchmark validates the SD2 diagnosis machinery on controlled offline logs; it does not replace real-model robustness experiments.
+The synthetic benchmark validates the SD2 diagnosis machinery on controlled
+offline logs; it does not replace real-model robustness experiments.
 
 ## Metric Config
 

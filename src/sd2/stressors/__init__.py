@@ -19,6 +19,7 @@ from sd2.stressors.temporal import (
 from sd2.stressors.visual import (
     BrightnessShiftStressor,
     ContrastShiftStressor,
+    FogStressor,
     GaussianNoiseStressor,
     JpegCompressionStressor,
     LowLightStressor,
@@ -32,6 +33,7 @@ __all__ = [
     "FrameDelayStressor",
     "FrameDropStressor",
     "FrameRef",
+    "FogStressor",
     "GaussianNoiseStressor",
     "ImageStressor",
     "JpegCompressionStressor",
