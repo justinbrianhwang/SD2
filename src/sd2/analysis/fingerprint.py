@@ -15,12 +15,38 @@ from sd2.core.config import SD2Config
 from sd2.core.stage import Stage
 
 
+#: Stages observed by *every* SD2 model adapter, including the camera-only
+#: baselines that have no semantic head (AIM/CILRS/TCP) and CILRS, which
+#: regresses control directly and predicts no waypoints. Averaging only these
+#: stages makes ``common_stage_mean`` comparable across architectures, whereas
+#: ``mean_robustness`` averages whatever each model happens to expose.
+COMMON_STAGES: tuple[Stage, ...] = (Stage.VISION, Stage.CONTROL)
+
+
+def mean_over_stages(
+    stage_scores: dict[Stage, float | None],
+    stages: Sequence[Stage] = COMMON_STAGES,
+) -> float | None:
+    """Mean robustness over a fixed stage subset.
+
+    Returns ``None`` unless *every* requested stage was observed, so a model
+    that is missing one of the common stages is never silently compared on a
+    smaller subset than the others.
+    """
+
+    scores = [stage_scores.get(stage) for stage in stages]
+    if not scores or any(score is None for score in scores):
+        return None
+    return mean(float(score) for score in scores)  # type: ignore[arg-type]
+
+
 @dataclass(frozen=True)
 class RobustnessFingerprint:
     """Stage-wise robustness scores where higher means more robust."""
 
     stage_scores: dict[Stage, float | None]
     mean_robustness: float | None
+    common_stage_mean: float | None = None
     run_count: int = 1
 
     def to_dict(self) -> dict[str, Any]:
@@ -31,6 +57,8 @@ class RobustnessFingerprint:
                 stage.value: score for stage, score in self.stage_scores.items()
             },
             "mean_robustness": self.mean_robustness,
+            "common_stage_mean": self.common_stage_mean,
+            "common_stages": [stage.value for stage in COMMON_STAGES],
             "run_count": self.run_count,
         }
 
@@ -73,6 +101,7 @@ def compute_robustness_fingerprint(
     return RobustnessFingerprint(
         stage_scores=stage_scores,
         mean_robustness=mean_robustness,
+        common_stage_mean=mean_over_stages(stage_scores),
         run_count=1,
     )
 
@@ -113,6 +142,7 @@ def aggregate_robustness_fingerprints(
     return RobustnessFingerprint(
         stage_scores=aggregated_scores,
         mean_robustness=mean_robustness,
+        common_stage_mean=mean_over_stages(aggregated_scores),
         run_count=len(fingerprints),
     )
 

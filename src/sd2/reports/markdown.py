@@ -11,6 +11,7 @@ from pathlib import Path
 from statistics import mean
 from typing import Any
 
+from sd2.analysis.fingerprint import COMMON_STAGES
 from sd2.core.stage import Stage
 from sd2.reports.plots import (
     plot_deviation_timeline,
@@ -53,6 +54,7 @@ class FingerprintAggregate:
     run_count: int
     stage_scores: dict[str, float | None]
     mean_robustness: float | None
+    common_stage_mean: float | None
     source_dirs: list[Path]
 
 
@@ -319,6 +321,12 @@ def aggregate_fingerprint_files(analysis_dir: str | Path) -> list[FingerprintAgg
         stage_scores = _average_stage_scores([fingerprint for _, fingerprint in items])
         observed = [score for score in stage_scores.values() if score is not None]
         mean_score = None if not observed else mean(observed)
+        common_scores = [stage_scores.get(stage.value) for stage in COMMON_STAGES]
+        common_mean = (
+            None
+            if any(score is None for score in common_scores)
+            else mean(float(score) for score in common_scores)  # type: ignore[arg-type]
+        )
         aggregates.append(
             FingerprintAggregate(
                 model_id=model_id,
@@ -328,6 +336,7 @@ def aggregate_fingerprint_files(analysis_dir: str | Path) -> list[FingerprintAgg
                 run_count=len(items),
                 stage_scores=stage_scores,
                 mean_robustness=mean_score,
+                common_stage_mean=common_mean,
                 source_dirs=[path for path, _ in items],
             )
         )
@@ -345,10 +354,16 @@ def _fingerprint_summary_markdown(aggregates: list[FingerprintAggregate]) -> str
         "Severity",
         "Runs",
         *[_display_stage(stage) for stage in stage_names],
-        "Mean",
+        "Observed mean",
+        "Common mean",
     ]
+    common_label = " + ".join(stage.value for stage in COMMON_STAGES)
     lines = [
         "# SD2 Fingerprint Summary",
+        "",
+        f"`Observed mean` averages whichever stages a model exposes, so it is only "
+        f"comparable *within* a model. `Common mean` averages the stages every model "
+        f"exposes ({common_label}) and is the column to use for cross-model ranking.",
         "",
         _table_header(headers),
         _table_separator(len(headers)),
@@ -362,6 +377,7 @@ def _fingerprint_summary_markdown(aggregates: list[FingerprintAggregate]) -> str
             str(aggregate.run_count),
             *[_format_optional_float(aggregate.stage_scores.get(stage)) for stage in stage_names],
             _format_optional_float(aggregate.mean_robustness),
+            _format_optional_float(aggregate.common_stage_mean),
         ]
         lines.append(_table_row(row))
     return "\n".join(lines) + "\n"

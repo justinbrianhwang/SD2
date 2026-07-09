@@ -2,8 +2,8 @@
 
 | Field | Value |
 | --- | --- |
-| Model | openemma |
-| Scenario | town05_route01 |
+| Model | transfuser |
+| Scenario | Town10HD_Opt_spawn0_dest77 |
 | Condition | stress |
 | Stress Type | gaussian_noise |
 | Severity | 3 |
@@ -11,7 +11,7 @@
 
 ## Summary Diagnosis
 
-Under Gaussian Noise severity 3, the openemma model completed 92.0% of the route and experienced a collision and a lane invasion. The Reasoning stage showed the earliest critical deviation at t=1.500s (frame 15), preceding downstream Planning and Control deviation and the driving-failure event. Downstream deviation increases followed the Reasoning onset in the order Planning (+0.080) and Control (+0.088). The primary_failure_stage label is Reasoning. Upstream perception did not show an earlier critical deviation; reasoning-stage deviation was followed by planning/control deviation.
+Under Gaussian Noise severity 3, the transfuser model completed 83.5% of the route and did not record a collision or lane invasion. No stage crossed the critical deviation threshold. Downstream deviation increases followed the Planning onset in the order Control (+0.020). The primary_failure_stage label is Planning. Planning had the highest observed mean deviation (0.234) across the pipeline stages.
 
 Diagnosis type: temporal-correlational; this report identifies the earliest-collapsing stage by timing, not mechanistic proof.
 
@@ -19,19 +19,18 @@ Diagnosis type: temporal-correlational; this report identifies the earliest-coll
 
 | Metric | Clean | Stress | Delta |
 | --- | --- | --- | --- |
-| Collision | no | yes | n/a |
-| Lane invasion | no | yes | n/a |
-| Route progress | 100.0% | 92.0% | 8.0 pp |
+| Collision | no | no | n/a |
+| Lane invasion | no | no | n/a |
+| Route progress | 84.8% | 83.5% | 1.3 pp |
 
 ## Stage-wise Mean Deviation
 
 | Stage | Mean | Max | Status | Samples |
 | --- | --- | --- | --- | --- |
-| Vision | 0.001 | 0.005 | healthy | 30 |
-| Semantic | 0.033 | 0.250 | healthy | 30 |
-| Reasoning | 0.471 | 0.950 | warning | 30 |
-| Planning | 0.080 | 0.300 | healthy | 30 |
-| Control | 0.116 | 0.409 | healthy | 30 |
+| Vision | 0.121 | 0.279 | healthy | 120 |
+| Semantic | 0.086 | 0.181 | healthy | 120 |
+| Planning | 0.234 | 0.521 | healthy | 120 |
+| Control | 0.102 | 0.269 | healthy | 120 |
 
 ## Collapse Onset Times
 
@@ -39,45 +38,45 @@ Diagnosis type: temporal-correlational; this report identifies the earliest-coll
 | --- | --- | --- |
 | Vision | n/a | n/a |
 | Semantic | n/a | n/a |
-| Reasoning | t=1.500s, frame 15, score 0.950 | t=1.500s, frame 15, score 0.950 |
-| Planning | n/a | n/a |
-| Control | t=2.800s, frame 28, score 0.404 | n/a |
+| Reasoning | n/a | n/a |
+| Planning | t=0.700s, frame 14, score 0.456 | n/a |
+| Control | n/a | n/a |
 
 ## Propagation Summary
 
 | Edge | Legacy Ratio | Clipped Ratio | Log Ratio | Absolute Increase | Persistence | Lag |
 | --- | --- | --- | --- | --- | --- | --- |
-| Vision -> Semantic | n/a | n/a | n/a | n/a | n/a | 0 |
-| Semantic -> Reasoning | 3.800 | 3.800 | 1.335 | n/a | n/a | 0 |
-| Reasoning -> Planning | 0.170 | 0.170 | -1.993 | -0.783 | 0.000 | 0 |
-| Planning -> Control | 1.349 | 1.349 | 0.249 | n/a | n/a | 0 |
+| Vision -> Semantic | 0.752 | 0.752 | -0.484 | n/a | n/a | 0 |
+| Semantic -> Reasoning | n/a | n/a | n/a | n/a | n/a | 0 |
+| Reasoning -> Planning | n/a | n/a | n/a | n/a | n/a | 0 |
+| Planning -> Control | 0.561 | 0.561 | -1.169 | -0.135 | 0.000 | 0 |
 
 ## Robustness Fingerprint
 
-![Robustness fingerprint](robustness_fingerprint.png)
+![Robustness fingerprint](plots/robustness_fingerprint.png)
 
 | Stage | Robustness |
 | --- | --- |
-| Vision | 0.999 |
-| Semantic | 0.967 |
-| Reasoning | 0.529 |
-| Planning | 0.920 |
-| Control | 0.884 |
-| Mean | 0.860 |
+| Vision | 0.879 |
+| Semantic | 0.914 |
+| Reasoning | n/a |
+| Planning | 0.766 |
+| Control | 0.898 |
+| Mean | 0.864 |
 | Run count | 1 |
 
 ```text
-openemma Robustness Fingerprint
+transfuser Robustness Fingerprint
 
-Vision:      [##########] 1.00
-Semantic:    [##########] 0.97
-Reasoning:   [#####-----] 0.53
-Planning:    [#########-] 0.92
-Control:     [#########-] 0.88
+Vision:      [#########-] 0.88
+Semantic:    [#########-] 0.91
+Reasoning:   [??????????] n/a
+Planning:    [########--] 0.77
+Control:     [#########-] 0.90
 ```
 
 ## Embedded Plots
 
-![Stage-wise deviation timeline](deviation_timeline.png)
+![Stage-wise deviation timeline](plots/deviation_timeline.png)
 
-![Propagation scores](propagation_scores.png)
+![Propagation scores](plots/propagation_scores.png)
