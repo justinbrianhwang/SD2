@@ -1,0 +1,62 @@
+{
+  "calibration_type": "clean_clean_variance",
+  "source": "clean_clean_variance",
+  "k_warning": 2.0,
+  "k_critical": 3.0,
+  "warning": 0.4,
+  "critical": 0.7,
+  "fallback_thresholds": {
+    "warning": 0.4,
+    "critical": 0.7
+  },
+  "pair_count": 10,
+  "source_run_ids": [
+    "carla_basic_agent_Town10HD_Opt_spawn0_dest77_clean_seed42",
+    "carla_basic_agent_Town10HD_Opt_spawn0_dest77_clean_seed42",
+    "carla_basic_agent_Town10HD_Opt_spawn0_dest77_clean_seed42",
+    "carla_basic_agent_Town10HD_Opt_spawn0_dest77_clean_seed42",
+    "carla_basic_agent_Town10HD_Opt_spawn0_dest77_clean_seed42"
+  ],
+  "stages": {
+    "vision": {
+      "warning": 0.4,
+      "critical": 0.7,
+      "clean_clean_mean": null,
+      "clean_clean_std": null,
+      "sample_count": 0,
+      "fallback_to_config": true
+    },
+    "semantic": {
+      "warning": 0.4,
+      "critical": 0.7,
+      "clean_clean_mean": null,
+      "clean_clean_std": null,
+      "sample_count": 0,
+      "fallback_to_config": true
+    },
+    "reasoning": {
+      "warning": 0.4,
+      "critical": 0.7,
+      "clean_clean_mean": null,
+      "clean_clean_std": null,
+      "sample_count": 0,
+      "fallback_to_config": true
+    },
+    "planning": {
+      "warning": 0.04744431271802463,
+      "critical": 0.07049980238026363,
+      "clean_clean_mean": 0.0013333333935466108,
+      "clean_clean_std": 0.02305548966223901,
+      "sample_count": 1200,
+      "fallback_to_config": false
+    },
+    "control": {
+      "warning": 0.04390924596334416,
+      "critical": 0.06192145053922933,
+      "clean_clean_mean": 0.00788483681157383,
+      "clean_clean_std": 0.018012204575885166,
+      "sample_count": 1200,
+      "fallback_to_config": false
+    }
+  }
+}
