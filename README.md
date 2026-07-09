@@ -1,10 +1,24 @@
 # SD2
 
-SD2 (System Deviation Diagnosis) is an offline analysis framework for studying how stress conditions affect functional stages in vision-language autonomous driving systems. The MVP reads stored clean and stress run logs, pairs matching frames, computes stage-wise deviation and downstream temporal evidence, labels the primary failure stage, and generates a Markdown report with plots.
+**SD2 (System Deviation Diagnosis)** is a robustness diagnosis framework for **end-to-end (E2E) autonomous driving models**. It decomposes a driving system into a functional pipeline — **perception → scene understanding → planning → control → outcome** — runs the same scenario under clean and stressed conditions, measures how much each stage deviates, and localizes the stage where robustness *first* collapses and how the error propagates downstream.
 
 Instead of asking *"how well does this model drive?"*, SD2 asks *"where in the pipeline does robustness collapse, and how does the error propagate?"*
 
-Diagnosis outputs are **temporal-correlational**. They identify the earliest stage whose deviation crosses configured thresholds and is temporally followed by downstream deviation and/or driving failure evidence. They do not prove a mechanistic root explanation.
+![SD2 concept: where does robustness collapse in the driving pipeline](assets/images/fig1_concept.png)
+
+Diagnosis outputs are **temporal-correlational**: SD2 identifies the earliest stage whose deviation crosses calibrated thresholds and is temporally followed by downstream deviation and/or driving-failure evidence. It does not claim a mechanistic root cause.
+
+## What SD2 observes
+
+A modern E2E model is a black box from sensors to actuation. SD2 "opens" it into observable functional stages and reads the intermediate state at each one — raw image, neural features, a bird's-eye scene map, the predicted trajectory, and the vehicle control signals:
+
+![Opening the E2E black box into functional stages](assets/images/fig2_pipeline.png)
+
+## How it works
+
+SD2 pairs a **clean run** with a **stress run** frame by frame, computes a normalized deviation per stage, analyzes how deviations propagate between adjacent stages, and diagnoses the **primary failure stage** — then writes a Markdown report:
+
+![SD2 method flow: clean/stress runs to diagnosis report](assets/images/fig3_method.png)
 
 ## Example Output
 
@@ -23,6 +37,14 @@ From this, the diagnosis module generates a natural-language summary:
 `diagnosis.json` includes `"diagnosis_type": "temporal_correlational"` to make this framing explicit.
 
 See the full generated report at [docs/example/example_report.md](docs/example/example_report.md).
+
+## Cross-architecture comparison
+
+Because SD2 is architecture-agnostic, it can diagnose different E2E models under the *same* stress and reveal that they fail at *different* stages. On real CARLA closed-loop runs under Gaussian noise, **InterFuser** keeps a robust visual encoder but collapses at the **scene-understanding (semantic)** stage, while **TransFuser**'s fused feature is itself noise-sensitive so its collapse originates at the **vision/feature** stage and propagates downstream:
+
+![Cross-architecture failure comparison: semantic-stage vs feature-stage collapse](assets/images/fig4_cross_model.png)
+
+Details and the honest caveats are in [docs/example/cross_model_comparison.md](docs/example/cross_model_comparison.md).
 
 ## Validation: Synthetic Fault Injection Benchmark
 
