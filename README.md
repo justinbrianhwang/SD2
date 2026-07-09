@@ -452,8 +452,9 @@ sd2 analyze --clean data/carla/transfuser_town10_clean_seed42.jsonl --stress dat
 
 The creep is TransFuser's own mechanism; `--creep-speed`/`--creep-threshold` only
 change *when* it engages, not the model's predictions. The same cold-start crawl
-affects AIM/CILRS/TCP (NEAT escapes it on its own); their stage-sensitivity
-deviations are still valid, but treat their route progress as a lower bound.
+affects the AIM/CILRS/TCP camera baselines (NEAT escapes it on its own); those
+recorders instead take a generic `--anti-crawl` flag that nudges the *applied*
+throttle to give the ego a rolling start — see the next section.
 
 If run (2) drives but (1) does not, the LiDAR safety box is the culprit; if
 `emergency_stop=False` throughout but `brake` stays high with sane waypoints,
@@ -493,10 +494,22 @@ models/NEAT/neat/args.txt
 models/TCP/checkpoints/tcp_b2d.ckpt
 ```
 
-Record and analyze AIM:
+**Anti-crawl (recommended).** AIM, CILRS, and TCP have no native creep
+controller, so from a standstill they fall into the same cold-start crawl
+limit-cycle described above and route progress stalls near zero. Their recorders
+accept a generic `--anti-crawl` flag that gives the ego a rolling start by
+nudging the **applied** throttle in sustained bursts while it crawls; the
+**recorded** control stage still holds the model's raw steer/throttle/brake, so
+the clean-vs-stress control comparison stays a pure model measurement. With
+`--anti-crawl --creep-speed 2.5 --creep-frames 4 --creep-throttle 0.6 --creep-duration 40`,
+all three complete ~85–90% of the route at a moving speed. Flags:
+`--creep-speed` (crawl threshold m/s), `--creep-frames` (crawl frames before a
+burst), `--creep-throttle` (burst throttle), `--creep-duration` (burst length).
+
+Record and analyze AIM (with anti-crawl):
 
 ```powershell
-python experiments/aim_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/AIM/aim/best_model.pth --stress none --output data/carla/aim_town10_clean_seed42.jsonl --spawn-index 0
+python experiments/aim_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/AIM/aim/best_model.pth --stress none --anti-crawl --creep-speed 2.5 --creep-frames 4 --creep-throttle 0.6 --creep-duration 40 --output data/carla/aim_town10_clean_seed42.jsonl --spawn-index 0
 python experiments/aim_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/AIM/aim/best_model.pth --stress gaussian_noise --stress-severity 3 --output data/carla/aim_town10_gaussian_noise_s3_seed42.jsonl --spawn-index 0
 sd2 analyze --clean data/carla/aim_town10_clean_seed42.jsonl --stress data/carla/aim_town10_gaussian_noise_s3_seed42.jsonl --config configs/mvp.yaml --output outputs/aim_town10_gaussian_noise_s3 --report
 ```

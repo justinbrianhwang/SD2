@@ -122,6 +122,42 @@ def parse_record_args(
     parser.add_argument("--stress-severity", type=int, default=3)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--spawn-index", type=int, default=0)
+    # Anti-crawl driving aid for models without a native creep controller
+    # (AIM/CILRS/TCP fall into a cold-start crawl limit-cycle). When enabled, the
+    # APPLIED throttle is nudged while the ego is crawling so it gets a rolling
+    # start; the RECORDED control stage still holds the model's raw output, and
+    # each nudged frame is flagged in the control state for transparency.
+    parser.add_argument(
+        "--anti-crawl",
+        action="store_true",
+        help="nudge applied throttle while the ego crawls, so cold-start-trapped "
+        "models drive the route (recorded control stays the model's raw output)",
+    )
+    parser.add_argument(
+        "--creep-speed",
+        type=float,
+        default=2.0,
+        help="speed (m/s) below which the ego counts as crawling (default 2.0)",
+    )
+    parser.add_argument(
+        "--creep-frames",
+        type=int,
+        default=5,
+        help="consecutive crawl frames before the throttle nudge engages (default 5)",
+    )
+    parser.add_argument(
+        "--creep-throttle",
+        type=float,
+        default=0.6,
+        help="applied throttle during an anti-crawl nudge (default 0.6)",
+    )
+    parser.add_argument(
+        "--creep-duration",
+        type=int,
+        default=40,
+        help="frames each anti-crawl throttle burst is sustained once engaged "
+        "(builds momentum instead of fighting per-frame braking; default 40)",
+    )
     args = parser.parse_args(argv)
     if args.frames < 0:
         parser.error("--frames must be non-negative")
@@ -272,15 +308,41 @@ def run_recording(
             town=args.town,
         )
 
+        anti_crawl = bool(getattr(args, "anti_crawl", False))
+        creep_speed = float(getattr(args, "creep_speed", 2.0))
+        creep_frames = int(getattr(args, "creep_frames", 5))
+        creep_throttle = float(getattr(args, "creep_throttle", 0.6))
+        creep_duration = int(getattr(args, "creep_duration", 40))
+        crawl_counter = 0
+        burst_remaining = 0
+
         for frame_idx in range(args.frames):
             frame_id = world.tick()
             packet = sensor_buffer.read(frame_id)
-            packet["speed"] = (frame_id, {"speed": ego_speed(ego_vehicle)})
+            current_speed = ego_speed(ego_vehicle)
+            packet["speed"] = (frame_id, {"speed": current_speed})
             control, extracted = runtime.run_step(
                 packet,
                 timestamp=frame_idx * args.delta,
                 frame_id=frame_id,
             )
+
+            # Anti-crawl nudge: the recorded control stage (built inside run_step)
+            # keeps the model's raw output; only the APPLIED throttle is nudged.
+            # Once engaged, the throttle burst is sustained for creep_duration
+            # frames to build momentum instead of fighting per-frame model braking.
+            crawl_counter = crawl_counter + 1 if current_speed < creep_speed else 0
+            if anti_crawl and burst_remaining == 0 and crawl_counter >= creep_frames:
+                burst_remaining = creep_duration
+                crawl_counter = 0
+            if anti_crawl and burst_remaining > 0:
+                control.throttle = creep_throttle
+                control.brake = 0.0
+                burst_remaining -= 1
+                if isinstance(extracted.get("control"), dict):
+                    extracted["control"]["anti_crawl_applied"] = True
+                    extracted["control"]["applied_throttle"] = creep_throttle
+
             ego_vehicle.apply_control(control)
 
             extracted["frame_idx"] = frame_idx

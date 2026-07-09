@@ -24,6 +24,7 @@ outputs/*
 # Scratch/debug CARLA recordings (not deliverables)
 data/carla/tf_anticrawl*.jsonl
 data/carla/tf_debug*.jsonl
+data/carla/*_test.jsonl
 
 # IDE / OS
 .vscode/

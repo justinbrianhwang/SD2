@@ -574,6 +574,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--stress-severity", type=int, default=3)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--spawn-index", type=int, default=0)
+    # Anti-crawl driving aid (see experiments/_carla_e2e_common.run_recording).
+    parser.add_argument("--anti-crawl", action="store_true")
+    parser.add_argument("--creep-speed", type=float, default=2.0)
+    parser.add_argument("--creep-frames", type=int, default=5)
+    parser.add_argument("--creep-throttle", type=float, default=0.6)
+    parser.add_argument("--creep-duration", type=int, default=40)
     args = parser.parse_args(argv)
     if args.frames < 0:
         parser.error("--frames must be non-negative")
