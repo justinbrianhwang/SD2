@@ -133,35 +133,45 @@ fingerprint (RQ3: *where* does each model first collapse?).
   consistent with a fused image+LiDAR feature that is itself perturbation-prone.
 - **AIM/TCP** keep control robust; their fragility is in planning under blur.
 
-### Cross-town robustness (Gaussian noise, severity 3, seed 42)
+### Cross-town robustness and generalization (Gaussian noise, severity 3, seed 42)
 
-Same models and stress across four maps. This asks whether the *failure
-signature* is a property of the architecture or of one map.
+Running the same models on other maps exposes a second, model-level result: these
+2021-era checkpoints **do not generalize across towns**. Driving is also strongly
+**spawn-dependent** — a spawn on open road drives, a spawn facing a junction
+crashes — so each town was probed with a NEAT spawn scout (`spawn_scout`) to find
+a drivable start before recording.
 
-| Model | Town01 | Town03 | Town05 | Town10HD | Fragile stage (all towns) |
-| --- | ---: | ---: | ---: | ---: | --- |
-| AIM (mean) | 0.873 | 0.935 | 0.953 | 0.947 | control / planning |
-| CILRS (mean) | 0.814 | 0.781 | 0.924 | 0.977 | control |
-| NEAT (mean) | 0.619 | 0.929 | 0.795 | 0.905 | **planning** (0.43–0.90); semantic stays robust |
-| TCP (mean) | 0.914 | 0.847 | 0.875 | 0.857 | **planning** |
-| TransFuser (mean) | 0.885 | 0.840 | 0.843 | 0.864 | **planning**; semantic stays robust |
+| Model | Town10HD (spawn 0) | Town01 (spawn 128) | Town03 | Town05 |
+| --- | ---: | ---: | ---: | ---: |
+| AIM | 0.947 · ~88% | 0.929 · ~35% | 0.935 · OOD | 0.953 · OOD |
+| CILRS | 0.977 · ~85% | 0.825 · ~54% | 0.781 · OOD | 0.924 · OOD |
+| NEAT | 0.905 · ~85% | 0.892 · **~72%** | 0.929 · OOD | 0.795 · OOD |
+| TCP | 0.857 · ~87% | 0.894 · ~41% | 0.847 · OOD | 0.875 · OOD |
+| TransFuser | 0.864 · ~85% | 0.670 · ~46%† | 0.840 · OOD | 0.843 · OOD |
 
-The absolute robustness moves with the map, but the **weakest stage is the same
-across towns** for each architecture: NEAT and TransFuser always collapse first
-at *planning* while keeping *semantic* robust; AIM/CILRS keep *vision* robust and
-break at *control*. That town-invariance is the point — SD2 reads an
-architecture-level signature, not a map artifact.
+*Each cell is `mean robustness · clean route completion`. **OOD** = no scouted
+spawn produced a drivable run (best NEAT probe ≤ 5% with frequent collisions).*
 
-> **Honest caveat — driving does not transfer.** The `--anti-crawl`/creep driving
-> aids are tuned for Town10HD_Opt spawn 0. At the default spawn of Town01/03/05
-> the forced rolling-start drives several models into obstacles (e.g. TransFuser
-> 59–74 collisions in Town01, TCP stuck at 0% in Town03/05), so **route
-> completion in the new towns is a negative result**, not a driving demo. The
-> stage-deviation fingerprints above are still valid model-output sensitivity
-> (the network processes every frame regardless of where the car ends up), but
-> the new-town runs are not clean closed-loop drives. Per-town, per-spawn creep
-> tuning (or the leaderboard scenario framework) is needed for real closed-loop
-> driving off Town10HD.
+- **Town10HD and Town01 drive** (with a scouted spawn): NEAT completes ~72% of
+  Town01, and every model gives a real moving-ego closed-loop pair there.
+- **Town03 and Town05 are out-of-distribution** — across six probed spawns even
+  NEAT (the strongest driver) never exceeds ~5% and usually crashes or stalls, so
+  no model drives them. This is a genuine **town-overfitting / generalization
+  failure** of the checkpoints, not a recorder bug (the identical recorder drives
+  Town10HD and Town01).
+- **Where the ego drives, the failure *signature* is consistent**: NEAT and
+  TransFuser stay semantic-robust and break first at *planning*; AIM/CILRS keep
+  *vision* robust and break at *control*. SD2 reads an architecture-level
+  signature, not a map artifact.
+- **† TransFuser is the least town-robust**: it drives Town01 clean (~46%) but
+  under Gaussian noise it crashes (62 collisions) and its semantic/planning
+  robustness falls to 0.52/0.58 — noise that is survivable in Town10HD is not in
+  Town01.
+
+For Town03/Town05 the stage deviations are still recorded but on non-driving
+egos, so they are model-output sensitivity, not closed-loop drives, and are
+omitted from the driving table above. Real closed-loop driving on those maps
+needs in-distribution checkpoints or the leaderboard scenario framework.
 
 Regenerate any of these with `sd2 analyze` + `sd2 fingerprint` / `sd2 aggregate`
 (commands in the model sections below).
