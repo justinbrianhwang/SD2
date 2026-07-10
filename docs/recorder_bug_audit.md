@@ -3,7 +3,14 @@
 Verifying the counterfactual-intervention work surfaced nine defects in the CARLA recording
 pipeline. Two of them silently corrupted the driving itself and the metric used to report it.
 Verifying *those* fixes surfaced five more, of a different kind: command-line flags that were
-accepted and then silently ignored. Fourteen in total, all listed below.
+accepted and then silently ignored. Diagnosing why TransFuser would not drive surfaced three more,
+the worst of the lot: the sensors were never configured, so every model was fed a 2x zoomed camera
+and a 25x sparser LiDAR than its checkpoint expects. Seventeen in total, all listed below.
+
+Each round of verification found the next round's bugs. The recurring cause is a silent fallback —
+`has_attribute` skipping a misspelled key, `getattr(args, ..., default)` swallowing a missing flag,
+a copy-pasted helper drifting from the one that was fixed. Every fix below therefore ships with a
+guard that turns the silence into an error.
 
 **Every live CARLA result recorded before this audit is invalid and must be re-recorded.** That
 includes the robustness fingerprints, the cross-stress and cross-town tables, the anti-crawl
@@ -315,18 +322,152 @@ local `_cleanup`. That is the general form of the defect, not just its five inst
 
 ---
 
+## The sensors were never configured
+
+Every recorder builds a `sensors()` spec copied from its upstream agent. Those agents run under the
+CARLA leaderboard, whose `agent_wrapper.setup_sensors` translates the spec onto the blueprint and
+injects a large set of attributes. Our recorders bypass the leaderboard, and
+`attach_model_sensors` forwarded exactly five keys:
+
+```python
+for attr in ("width", "height", "fov", "sensor_tick", "reading_frequency"):
+    if attr in spec and blueprint.has_attribute(attr):
+        blueprint.set_attribute(attr, str(spec[attr]))
+```
+
+**`width` and `height` are not blueprint attributes.** The camera blueprint calls them
+`image_size_x` and `image_size_y`. `has_attribute` returned `False`, so the assignment was a silent
+no-op and every camera ran at CARLA's default 800x600 regardless of what the recorder asked for.
+The `if ... has_attribute` idiom turned a wrong name into silence instead of an error.
+
+This is not cosmetic. The agents feed the raw frame to `scale_and_crop_image(image, crop=256)`,
+which centre-crops 256 pixels. On the intended 400x300 frame that crop spans 64% of the width; on
+the 800x600 frame we actually delivered it spans 32%. At `fov=100` the models saw an effective
+horizontal field of view of roughly 32 degrees instead of 64 — a 2x zoom, with the vanishing point
+and road geometry displaced accordingly.
+
+No LiDAR attribute was set at all, so the LiDAR fell back to CARLA's defaults. Measured live at the
+same pose over 20 ticks:
+
+| | channels | points_per_second | points/frame |
+| --- | --- | --- | --- |
+| ours (CARLA defaults) | 32 | 56000 | **626** |
+| leaderboard | 64 | 600000 | **15546** |
+
+The leaderboard's camera lens attributes (`lens_circle_multiplier`, `lens_circle_falloff`,
+`chromatic_aberration_intensity`, `chromatic_aberration_offset`) were likewise never applied.
+
+Measured resolutions before and after the fix, read from each recorder's own first-packet log:
+
+| recorder | declared | delivered before | delivered after |
+| --- | --- | --- | --- |
+| aim, cilrs, neat | 400x300 | 800x600 | 400x300 |
+| tcp | 900x256 | 800x600 | 900x256 |
+| transfuser | 960x480 | 800x600 | 960x480 |
+| interfuser (side cameras) | 400x300 | 800x600 | 400x300 |
+| lidar (interfuser, transfuser) | — | 626 pts | 16159 pts |
+
+**Every model had been driving on inputs materially different from the ones its checkpoint was
+trained and evaluated on.** All live results predating this fix are invalid, including the
+"post-fix" InterFuser figures reported earlier in this document.
+
+### Fix
+
+`configure_sensor_blueprint` now mirrors `agent_wrapper.setup_sensors`: it translates
+`width`/`height` to `image_size_x`/`image_size_y`, applies the leaderboard defaults per sensor
+family, and lets an explicit spec value override a default.
+
+Two guards make the class of defect impossible to reintroduce. A spec key that maps to no blueprint
+attribute now raises instead of being skipped, and every written attribute is read back and compared.
+The read-back compares floats at binary32 precision, because CARLA stores them as 32-bit floats and
+`0.45` returns as `0.44999998807907104` — an exact comparison rejects a correctly applied value. That
+was caught by a three-frame smoke test before any long run.
+
+Separately, `validate_sensor_ticks` had only ever run on the four recorders that go through
+`attach_model_sensors`; `interfuser` and `transfuser` hand-roll their attach loops and never reached
+it. All six now do, enforced by an AST wiring test.
+
+---
+
+## The cold-start crawl is real, and anti-crawl does not fix TransFuser
+
+With the sensors corrected, the crawl was re-measured. 300 frames (15 s), Town10HD_Opt, spawn 0,
+seed 42, no stress, no traffic, **no anti-crawl**, CARLA restarted before each run. Speed is the
+ego's own speed from `states.planning.ego`.
+
+| model | route progress | mean speed | frames moving | collisions |
+| --- | --- | --- | --- | --- |
+| InterFuser | 0.2462 | 4.95 m/s | 300/300 | 0 |
+| NEAT | 0.1221 | 2.38 m/s | 152/300 | **69** |
+| AIM | 0.0248 | 0.71 m/s | 188/300 | 0 |
+| TCP | 0.0029 | 1.09 m/s | 298/300 | 0 |
+| TransFuser | 0.0000 | 0.00 m/s | 0/300 | 0 |
+| CILRS | 0.0000 | 0.00 m/s | 0/300 | 0 |
+
+The hypothesis that the crawl was an artifact of the 2x zoomed camera is **refuted**. AIM barely
+moved (0.66 -> 0.71 m/s) and TransFuser went from 0.12 m/s to a dead stop. Only InterFuser drives.
+
+TransFuser's own creep controller cannot fire on these routes: `config.stuck_threshold` is
+`1100/action_repeat = 550` processed frames, about 55 s, far beyond a 300-frame run. Sweeping the
+creep and anti-crawl parameters:
+
+| configuration | progress | speed after frame 150 | **frames the model braked** | collisions |
+| --- | --- | --- | --- | --- |
+| default | 0.0000 | 0.00 | 300/300 | 0 |
+| `--tf-stuck-threshold 5 --tf-creep-duration 60` | 0.0889 | 0.94 | 129/300 | 12 |
+| `--tf-stuck-threshold 5 --tf-creep-duration 120` | 0.0949 | 3.16 | 27/300 | 13, off route |
+| `--anti-crawl --creep-duration 40` | 0.1553 | 3.15 | 291/300 | 0 |
+| `--anti-crawl --creep-duration 100` | **0.3163** | 6.61 | **300/300** | 0 |
+| both | 0.0799 | 3.10 | 86/300 | 22, off route |
+
+Read the last two columns together. The best-looking row completes **more of the route than
+InterFuser** while the model commanded a full brake on **every single frame**. The anti-crawl nudge
+overrode the applied throttle on 243 of 300 frames and pushed a braking model 93 m down the road;
+the only thing TransFuser contributed was steering. Forcing motion with its native creep instead
+produces 12-22 collisions and leaves the route.
+
+**There is no creep parameter that makes TransFuser drive.** Its checkpoint, under this harness,
+outputs `brake = 1.0` on 100% of frames with a predicted `target_speed` of 0.02 m/s, while its
+`target_point` is a sane ~35 m ahead and its RGB assembly matches the reference agent's. CILRS is in
+the same state. Reporting a route-completion number for either model under anti-crawl would be
+reporting the protocol's number, not the model's.
+
+The remaining known divergence from the reference agent is `action_repeat`: `submission_agent.run_step`
+returns the previous control on every second frame (`if self.step % 2 == 1`), so the network decides
+at 10 Hz, while our recorder runs it every frame at 20 Hz. That is the next thing to test. Until
+TransFuser and CILRS drive without being pushed, no outcome-based claim about them is defensible.
+
+---
+
 ## Verification status
 
-All fourteen fixes are covered by the pure test suite (240 tests) and, where the defect only
-manifests against a live simulator, by a live CARLA check. The first coherent recording after the
-fixes:
+All seventeen fixes are covered by the pure test suite (258 tests) and, where the defect only
+manifests against a live simulator, by a live CARLA check. The first coherent recording with
+correctly configured sensors:
 
 ```
-InterFuser, Town10HD_Opt, spawn 0, 300 frames, no stress, no traffic
-route_progress  0.0000 -> 0.2551
+InterFuser, Town10HD_Opt, spawn 0, 300 frames, no stress, no traffic, no anti-crawl
+route_progress  0.0000 -> 0.2462
 off_route       never true
-target_speed    mean 5.00, zero frames 0/300
+mean speed      4.95 m/s, moving on 300/300 frames
+model braked    5/300 frames
 ```
 
-A run that "drives" while `route_progress` never advances is the signature of defect 1. A run whose
-`route_progress` jumps discontinuously is the signature of defect 2. Both are now checked directly.
+The earlier figure of 0.2551 in this document came from the same route recorded through the
+crippled 800x600 camera and 626-point LiDAR. It is superseded, not corrected — the two runs are not
+comparable.
+
+Signatures now checked directly: a run that "drives" while `route_progress` never advances is
+defect 1; a run whose `route_progress` jumps discontinuously is defect 2; a sensor packet whose
+shape does not match the recorder's declared spec is the sensor defect; and a route-completion
+figure recorded while the model braked on most frames is the anti-crawl protocol reporting its own
+number rather than the model's.
+
+### What is still not defensible
+
+InterFuser drives. NEAT drives but collides 69 times in 15 seconds. AIM and TCP crawl. TransFuser
+and CILRS output a full brake on every frame and do not move at all. Any outcome-based comparison
+across this set would currently be a comparison of how hard the evaluation protocol pushed each
+model, not of the models. The next step is `action_repeat`: the reference agents decide at 10 Hz and
+reuse the previous control on alternate frames, while our recorders run the network every frame at
+20 Hz.

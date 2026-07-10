@@ -656,14 +656,23 @@ simulator, so the nudge is auditable offline and an ablation can cite exact fram
 counts.
 
 Which models need it was **measured**, not assumed — see
-[the re-evaluation](docs/recorder_bug_audit.md#anti-crawl-re-evaluation-after-the-coordinate-fix).
-InterFuser needs no nudge; its apparent crawl was an artifact of the mirrored-plan
-bug. AIM and TransFuser genuinely crawl. Anti-crawl is **not innocuous**: it gets
-AIM moving, but the run goes `off_route`, so a "driving" AIM run under anti-crawl is
-not following the route it is being scored on. Route-completion claims for AIM and
-TransFuser under anti-crawl are not currently defensible; the earlier
-"~85–90% of the route" figure came from the fabricated route tracker and is
-withdrawn.
+[the audit](docs/recorder_bug_audit.md#the-cold-start-crawl-is-real-and-anti-crawl-does-not-fix-transfuser).
+With correctly configured sensors, over 300 frames with no nudge: InterFuser drives
+the route at 4.95 m/s and needs nothing. NEAT drives but collides 69 times. AIM
+(0.71 m/s) and TCP (1.09 m/s) crawl. **TransFuser and CILRS command a full brake on
+every frame and never move.**
+
+Anti-crawl is **not innocuous, and it does not rescue a model that will not drive.**
+It gets AIM moving, but the run goes `off_route`, so a "driving" AIM run under
+anti-crawl is not following the route it is scored on. On TransFuser it is worse: with
+`--creep-duration 100` the ego covers *more* of the route than InterFuser while the
+model brakes on **300 of 300 frames** — the nudge overrode the throttle on 243 frames
+and pushed a braking model 93 m. That number describes the protocol, not the model.
+
+**No route-completion figure for AIM, TCP, TransFuser or CILRS is currently
+defensible.** The earlier "~85–90% of the route" claim came from the fabricated route
+tracker and is withdrawn. Use `--anti-crawl` to study a model's *control outputs* under
+stress, never to produce an outcome metric for it.
 
 Flags: `--creep-speed` (crawl threshold m/s), `--creep-frames` (crawl frames before
 a burst), `--creep-throttle` (burst throttle), `--creep-duration` (burst length).
