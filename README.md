@@ -24,17 +24,22 @@ SD2 pairs a **clean run** with a **stress run** frame by frame, computes a norma
 
 ## Example Output
 
-A real CARLA closed-loop **TransFuser** run (Town10HD_Opt, Gaussian noise severity 3, matched clean/stress pair) produces a per-stage **robustness fingerprint** — higher is more robust:
+> **The figures and summary below come from recordings made before the
+> [2026-07-10 pipeline audit](docs/recorder_bug_audit.md) and are not
+> trustworthy.** Any route-completion figure in them is an artifact of the
+> progress-tracker defect. They are kept only to show the *shape* of SD2's output
+> and will be regenerated once re-recording finishes.
+
+A CARLA closed-loop **TransFuser** run produces a per-stage **robustness
+fingerprint** — higher is more robust:
 
 ![Robustness fingerprint](docs/example/robustness_fingerprint.png)
 
-The **deviation timeline** shows where robustness degrades first: TransFuser's planning deviation rises earliest and largest, with control drifting after it, while its semantic representation stays comparatively stable:
+The **deviation timeline** shows where robustness degrades first, and the
+diagnosis module turns it into a natural-language summary naming the primary
+failure stage, the downstream propagation order, and the driving outcome:
 
 ![Stage-wise deviation timeline](docs/example/deviation_timeline.png)
-
-From this, the diagnosis module generates a natural-language summary:
-
-> Under Gaussian Noise severity 3, the transfuser model completed 83.5% of the route and did not record a collision or lane invasion. No stage crossed the critical deviation threshold. Downstream deviation increases followed the Planning onset in the order Control (+0.020). The primary_failure_stage label is Planning. Planning had the highest observed mean deviation (0.234) across the pipeline stages.
 
 `diagnosis.json` includes `"diagnosis_type": "temporal_correlational"` to make this framing explicit — SD2 localizes the earliest-collapsing stage by timing, not by mechanistic proof.
 
@@ -42,7 +47,14 @@ See the full generated report at [docs/example/example_report.md](docs/example/e
 
 ## Cross-architecture comparison
 
-Because SD2 is architecture-agnostic, it can diagnose different E2E models under the *same* stress and reveal that they fail at *different* stages. On real CARLA closed-loop runs under Gaussian noise, **InterFuser** keeps a robust visual encoder but collapses at the **scene-representation (semantic)** stage, while **TransFuser**'s fused feature is itself noise-sensitive so its collapse originates at the **vision/feature** stage and propagates into planning:
+Because SD2 is architecture-agnostic, it can diagnose different E2E models under
+the *same* stress and reveal that they fail at *different* stages.
+
+> **The specific cross-model claims previously stated here (InterFuser collapsing
+> at the semantic stage, TransFuser at the vision/feature stage) rested on
+> recordings invalidated by the [pipeline audit](docs/recorder_bug_audit.md) and
+> have been withdrawn.** The figure below illustrates the comparison SD2 is
+> designed to make; it is not current evidence.
 
 ![Cross-architecture failure comparison: semantic-stage vs feature-stage collapse](assets/images/fig4_cross_model.png)
 
@@ -65,10 +77,31 @@ redistributes them. Original sources:
 
 ## Results: live CARLA robustness diagnosis
 
-All numbers below are from **real CARLA 0.9.16 closed-loop runs** (Town10HD_Opt,
-120 frames, synchronous mode, matched spawn/route/seed per pair). Robustness is
-`1 − mean normalized stage deviation` (higher = more robust, ∈ [0, 1]).
-`—` = stage not observable for that architecture (e.g. no semantic head).
+> **Withdrawn pending re-recording (2026-07-10).** An audit of the recording
+> pipeline found nine defects, two of which corrupted the driving itself and the
+> metric used to report it. Every live CARLA number previously published in this
+> section — robustness fingerprints, cross-stress and cross-town tables, the
+> anti-crawl ablation, and every route-completion figure — was produced by that
+> broken pipeline and has been removed rather than quietly restated.
+>
+> The evidence, the isolation experiments, and the verification of each fix are in
+> [docs/recorder_bug_audit.md](docs/recorder_bug_audit.md). The two defects that
+> matter:
+>
+> 1. **The global plan was mirrored about y = 0.** `_location_to_gps` used the
+>    CARLA 0.9.10 convention, but 0.9.16's GNSS reports latitude increasing with
+>    `+y`. All six models were steering toward a reflected goal. Measured live, the
+>    plan-vs-sensor delta was 48.99 m; after the fix, 0.16 m.
+> 2. **Route completion was fabricated by an index teleport.** The progress
+>    tracker searched the whole remaining route for the nearest waypoint, so where
+>    a route passed near itself the monotonic index jumped (12 → 254 in one frame)
+>    and completion leapt from 0.019 to 0.85. Replaying a real recording, a run
+>    reported as 80.8 % complete had covered 22 m of a 287 m route — about 7.7 %.
+>
+> Re-recording is under way. The methodology below is unchanged and still holds;
+> only the measurements were invalid.
+
+### Methodology that survives the audit
 
 #### Two means, and when to use which
 
@@ -77,173 +110,47 @@ comparable across models. SD2 therefore reports two summaries:
 
 - **Observed-stage mean** — averages whichever stages that model exposes. Use it
   for *within-model* diagnosis. It is **not** a cross-model ranking: a model is
-  penalised simply for exposing a fragile stage that another model hides. (In our
-  data InterFuser's observed mean is 0.902 only because it exposes a fragile
-  semantic head; on the stages it shares with the camera baselines it scores
-  0.957.)
+  penalised simply for exposing a fragile stage that another model hides.
 - **Common-stage mean** — averages the stages **every** model exposes, i.e.
   `vision + control` (CILRS regresses control directly and predicts no waypoints,
   and AIM/CILRS/TCP have no semantic head). Use it for *cross-model* comparison.
 
-`sd2 fingerprint` now emits both columns, and `fingerprint.json` carries
+`sd2 fingerprint` emits both columns, and `fingerprint.json` carries
 `common_stage_mean` alongside `mean_robustness`.
 
-#### Evaluation protocol: anti-crawl
+#### Evaluation protocol: anti-crawl, per model
 
-From a standstill these models fall into a cold-start crawl limit-cycle, which
-would make every deviation a near-stationary artifact. We therefore use an
-**anti-crawl moving-ego protocol**: TransFuser's own creep controller is allowed
-to engage during the crawl, and AIM/CILRS/TCP get a throttle burst on the
-*applied* actuation. It is applied **identically to the clean and the stress
-run**, and SD2 records each model's **raw control output separately from the
-applied actuation**, so the control-stage comparison remains a pure model
-measurement. It is an evaluation protocol, not a driving-score aid — the ablation
-is in [Anti-crawl ablation](#anti-crawl-ablation) below.
+Some checkpoints sit in a cold-start crawl limit-cycle from a standstill, which
+would make every deviation a near-stationary artifact. The **anti-crawl protocol**
+applies a throttle burst to the *applied* actuation only; the recorded `control`
+stage still holds the model's raw output, and the protocol is applied identically
+to the clean and the stress run.
 
-### Multi-seed statistical robustness (Gaussian noise, severity 3, seeds 42–46)
+After the coordinate fix, anti-crawl was re-measured rather than assumed. Each run:
+Town10HD_Opt, spawn 0, 300 frames (15 s), seed 42, no stress, no traffic, CARLA
+restarted before every run. Speed is the ego's recorded speed, not a proxy.
 
-| Model | n | Common-stage mean (cross-model) | Observed-stage mean (within-model) | Primary failure stage (stability) |
-| --- | --- | --- | --- | --- |
-| CILRS | 5 | **0.973 ± 0.004** | 0.973 ± 0.004 | none crosses critical |
-| AIM | 5 | 0.941 ± 0.005 | 0.947 ± 0.004 | control (5/5) |
-| TCP | 5 | 0.898 ± 0.004 | 0.845 ± 0.009 | planning (4/5) |
-| TransFuser | 5 | 0.898 ± 0.009 | 0.870 ± 0.006 | planning (5/5) |
-| NEAT | 5 | 0.897 ± 0.022 | 0.890 ± 0.015 | planning (4/5) |
+| Run | Route progress | `off_route` | Mean speed | Frames moving | Displacement |
+| --- | ---: | :---: | ---: | ---: | ---: |
+| InterFuser, no anti-crawl | 0.2551 | false | 4.95 m/s | 300/300 | 72.8 m |
+| AIM, no anti-crawl | 0.0245 | false | 0.66 m/s | 178/300 | 9.8 m |
+| AIM, with anti-crawl | 0.0391 | **true** | 3.48 m/s | 276/300 | 46.4 m |
+| TransFuser, default | 0.0073 | false | 0.12 m/s | 36/300 | 1.8 m |
 
-Across five seeds the per-model variance is small (std ≤ 0.022) and the primary
-failure stage is the same in ≥4/5 runs, so SD2's diagnoses are stable — the
-weakest stage is a property of the architecture, not of a lucky seed.
+Three findings, all of which contradict what we assumed before measuring:
 
-Note how the two means disagree: on the observed-stage mean **TCP looks worst
-(0.845)**, but that is only because it exposes a fragile planning stage that
-CILRS does not have. On the common stages TCP (0.898) is mid-field, tied with
-TransFuser. **Rank models with the common-stage column.** Generated with
-`sd2 aggregate` (see `outputs/multiseed/<model>/`).
+- **InterFuser needs no anti-crawl.** It drives at 4.95 m/s and stays on route.
+  Its previous crawling was entirely an artifact of the mirrored plan.
+- **AIM and TransFuser genuinely crawl.** The coordinate fix did not help them, so
+  the crawl is a property of those checkpoints. Anti-crawl remains necessary to
+  obtain any driving from them.
+- **Anti-crawl is not innocuous.** It gets AIM moving, but the run goes
+  `off_route`: the protocol trades a stationary ego for one that departs the route
+  it is being scored on. This was invisible before the `off_route` flag existed.
 
-### Cross-stress stage robustness (severity 3, seed 42, moving ego)
-
-Same model under four input stresses — this is the architecture-level robustness
-fingerprint (RQ3: *where* does each model first collapse?).
-
-Per-stage scores are directly comparable across models; the two mean columns are
-`observed` (within-model) and `common` = mean(vision, control) (cross-model).
-
-| Model | Stress | Vision | Semantic | Planning | Control | Observed mean | Common mean |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| AIM | gaussian_noise | 0.961 | — | 0.959 | 0.920 | 0.947 | 0.940 |
-| AIM | motion_blur | 0.877 | — | **0.672** | 0.809 | 0.786 | 0.843 |
-| AIM | brightness | 0.978 | — | 0.971 | 0.942 | 0.964 | 0.960 |
-| AIM | fog | 0.969 | — | 0.941 | 0.926 | 0.945 | 0.948 |
-| CILRS | gaussian_noise | 0.987 | — | — | 0.967 | 0.977 | 0.977 |
-| CILRS | motion_blur | **0.549** | — | — | 0.641 | **0.595** | **0.595** |
-| CILRS | brightness | 0.996 | — | — | 0.976 | 0.986 | 0.986 |
-| CILRS | fog | 0.957 | — | — | 0.897 | 0.927 | 0.927 |
-| InterFuser | gaussian_noise | 0.974 | **0.767** | 0.927 | 0.940 | 0.902 | 0.957 |
-| InterFuser | motion_blur | 0.952 | **0.773** | 0.885 | 0.981 | 0.898 | 0.966 |
-| InterFuser | brightness | 0.989 | 0.873 | 0.954 | 0.956 | 0.943 | 0.973 |
-| InterFuser | fog | 0.991 | 0.807 | 0.958 | 0.986 | 0.935 | 0.988 |
-| NEAT | gaussian_noise | 0.929 | 0.944 | 0.838 | 0.910 | 0.905 | 0.919 |
-| NEAT | motion_blur | 0.790 | 0.949 | **0.423** | 0.854 | 0.754 | 0.822 |
-| NEAT | brightness | 0.954 | 0.963 | 0.876 | 0.908 | 0.925 | 0.931 |
-| NEAT | fog | 0.948 | 0.955 | 0.854 | 0.878 | 0.909 | 0.913 |
-| TCP | gaussian_noise | 0.898 | — | 0.764 | 0.908 | 0.857 | 0.903 |
-| TCP | motion_blur | 0.874 | — | 0.753 | 0.956 | 0.861 | 0.915 |
-| TCP | brightness | 0.924 | — | 0.796 | 0.963 | 0.894 | 0.943 |
-| TCP | fog | 0.947 | — | 0.828 | 0.969 | 0.915 | 0.958 |
-| TransFuser | gaussian_noise | 0.879 | 0.914 | 0.766 | 0.898 | 0.864 | 0.889 |
-| TransFuser | motion_blur | **0.680** | 0.913 | **0.538** | 0.919 | 0.763 | 0.800 |
-| TransFuser | brightness | 0.961 | 0.955 | 0.901 | 0.906 | 0.931 | 0.934 |
-| TransFuser | fog | 0.965 | 0.953 | 0.909 | 0.965 | 0.948 | 0.965 |
-
-**What the numbers show (RQ3 — architectures fail at different stages):**
-
-- **Motion blur is the harshest stress** and it collapses the **planning** stage
-  hardest: NEAT 0.423, TransFuser 0.538, AIM 0.672, TCP 0.753. Fog and
-  brightness are mild (most stages > 0.9).
-- **CILRS is the least robust to motion blur** — its single-frame image feature
-  degrades (vision 0.549) and in closed loop the run crashed (47 collisions, 0%
-  route). Under gaussian/brightness it is otherwise the *most* robust model.
-- **InterFuser's weak point is semantic** (0.767–0.873 across all four stresses)
-  on top of a robust encoder — its object-density decoder is the fragile link.
-- **NEAT's BEV-seg semantic stays robust** (0.944–0.963) under every stress
-  while its planning is sensitive — perception is stable, trajectory is not.
-- **TransFuser** is vision- and planning-sensitive (both drop under noise/blur),
-  consistent with a fused image+LiDAR feature that is itself perturbation-prone.
-- **AIM/TCP** keep control robust; their fragility is in planning under blur.
-
-### Cross-town robustness and generalization (Gaussian noise, severity 3, seed 42)
-
-Running the same models on other maps exposes a second, model-level result: these
-2021-era checkpoints **do not generalize across towns**. Driving is also strongly
-**spawn-dependent** — a spawn on open road drives, a spawn facing a junction
-crashes — so each town was probed with a NEAT spawn scout (`spawn_scout`) to find
-a drivable start before recording.
-
-| Model | Town10HD (spawn 0) | Town01 (spawn 128) | Town03 | Town05 |
-| --- | ---: | ---: | ---: | ---: |
-| AIM | 0.940 · ~88% | 0.935 · ~35% | 0.938 · OOD | 0.951 · OOD |
-| CILRS | 0.977 · ~85% | 0.825 · ~54% | 0.781 · OOD | 0.924 · OOD |
-| NEAT | 0.919 · ~85% | 0.909 · **~72%** | 0.929 · OOD | 0.818 · OOD |
-| TCP | 0.903 · ~87% | 0.917 · ~41% | 0.900 · OOD | 0.920 · OOD |
-| TransFuser | 0.889 · ~85% | 0.787 · ~46%† | 0.895 · OOD | 0.884 · OOD |
-
-*Each cell is `common-stage mean robustness · clean route completion` — the
-common-stage mean is used because this is a cross-model table. **OOD** = no
-scouted spawn produced a drivable run (best NEAT probe ≤ 5% with frequent
-collisions).*
-
-- **Town10HD and Town01 drive** (with a scouted spawn): NEAT completes ~72% of
-  Town01, and every model gives a real moving-ego closed-loop pair there.
-- **Town03 and Town05 are out-of-distribution** — across six probed spawns even
-  NEAT (the strongest driver) never exceeds ~5% and usually crashes or stalls, so
-  no model drives them. This is a genuine **town-overfitting / generalization
-  failure** of the checkpoints, not a recorder bug (the identical recorder drives
-  Town10HD and Town01).
-- **Where the ego drives, the failure *signature* is consistent**: NEAT and
-  TransFuser stay semantic-robust and break first at *planning*; AIM/CILRS keep
-  *vision* robust and break at *control*. SD2 reads an architecture-level
-  signature, not a map artifact.
-- **† TransFuser is the least town-robust**: it drives Town01 clean (~46%) but
-  under Gaussian noise it crashes (62 collisions), its common-stage mean drops to
-  0.787 (from 0.889 in Town10HD) and its semantic/planning robustness falls to
-  0.52/0.58 — noise that is survivable in Town10HD is not in Town01.
-
-**Reading the OOD cells honestly.** SD2 still computes stage deviations for
-Town03/Town05, but on egos that never complete the route, so those numbers are
-raw model-output sensitivity to the perturbation, **not** closed-loop robustness
-— which is why they are marked OOD and kept out of the driving comparison. The
-result here is diagnostic rather than a driving score: SD2 surfaces *that* these
-checkpoints fall out of distribution on Town03/Town05, and — on the maps that do
-drive — *where* each architecture first breaks. Note also that a single seed and
-spawn is a thin sample per town; the driving percentages are indicative, not
-leaderboard numbers. Recovering real closed-loop driving on the OOD maps needs
-in-distribution checkpoints or the CARLA leaderboard scenario framework, not more
-spawn or creep tuning.
-
-### Anti-crawl ablation
-
-Clean-run route completion on Town10HD_Opt (seed 42, 120 frames), with and
-without the moving-ego protocol. NEAT needs no aid; every other model is
-near-stationary without it, which is why the protocol exists.
-
-| Model | Without anti-crawl / creep | With the protocol | Aid used |
-| --- | ---: | ---: | --- |
-| NEAT | ~85% | (not used) | none — drives natively |
-| AIM | ~0.7% | ~89% | generic `--anti-crawl` throttle burst |
-| CILRS | ~0.0% | ~85% | generic `--anti-crawl` throttle burst |
-| TCP | ~1.2% | ~87% | generic `--anti-crawl` throttle burst |
-| TransFuser | ~1.0% | ~85% | its **own** creep controller, engaged earlier |
-
-Read this as: **without the protocol the ego barely moves, so stage deviations
-would be measured on a near-stationary vehicle and would not describe pipeline
-robustness at all.** With it, clean and stress runs share the same protocol and
-the same seed/route, and the recorded `control` stage still holds each model's
-raw output (the nudge only changes the *applied* actuation), so the clean/stress
-comparison stays a model measurement. For TransFuser the protocol changes only
-*when* the model's own creep controller engages, not its predictions.
-
-Regenerate any of these with `sd2 analyze` + `sd2 fingerprint` / `sd2 aggregate`
-(commands in the model sections below).
+Anti-crawl is therefore reported **per model**, not as a global protocol, and
+route-completion claims for AIM and TransFuser under anti-crawl are not yet
+defensible.
 
 ## Validation: Synthetic Fault Injection Benchmark
 
@@ -281,6 +188,52 @@ See [docs/example/benchmark_report.md](docs/example/benchmark_report.md) and
 the embedded confusion heatmap:
 
 ![Synthetic benchmark confusion matrix](docs/example/confusion_matrix.png)
+
+### Validating the diagnosis: counterfactual intervention
+
+For live CARLA recordings, SD2 also supports same-pose counterfactual stage
+intervention. At each recorded tick the recorder reads the raw camera image as
+`I_clean`, computes `I_stress = stressor(I_clean)`, runs the model once on
+`I_stress` and once on `I_clean`, then routes one selected stage from one
+forward into the downstream controller. The two forwards occur at the same ego
+pose, target point, and velocity, so recovery or failure is not explained by
+clean and stress runs drifting into different closed-loop states before the
+comparison.
+
+Use:
+
+```bash
+python experiments/interfuser_record.py --stress gaussian_noise --stress-severity 3 --intervene-stage planning --intervene-direction restore --output data/carla/interfuser_restore_planning.jsonl
+python experiments/interfuser_record.py --stress gaussian_noise --stress-severity 3 --intervene-stage semantic --intervene-direction restore --output data/carla/interfuser_restore_semantic.jsonl
+sd2 intervention --baseline-clean data/carla/interfuser_clean.jsonl --stress data/carla/interfuser_stress.jsonl --intervened data/carla/interfuser_restore_planning.jsonl --config configs/mvp.yaml --output outputs/interfuser_restore_planning
+```
+
+`--intervene-direction restore` means the run is a stress run, but the selected
+stage is taken from the clean forward. It tests whether fixing that stage
+recovers driving. `--intervene-direction inject` means the run is otherwise
+clean, but the selected stage is taken from the stressed forward. It tests
+whether breaking only that stage reproduces the failure. `--intervene-stage none`
+still logs both forwards and both candidate controls while applying the
+normal stressed control.
+
+Support matrix:
+
+| Model | `planning` | `semantic` |
+| --- | --- | --- |
+| InterFuser | supported | supported |
+| NEAT | supported | supported (`red_light_occ`) |
+| TransFuser | supported for closed-loop outcome | hard error: detection head is off the causal path to control |
+| AIM | supported for closed-loop outcome | hard error: no semantic head |
+| TCP | supported for closed-loop outcome | hard error: no semantic head |
+| CILRS | hard error: no planning stage | hard error: no semantic head |
+
+Important caveat: for AIM, TCP, and TransFuser, the controller consumes planning
+waypoints and velocity only. At a fixed pose, restoring planning restores the
+per-tick control by construction; that is arithmetic, not empirical mediation
+evidence. For these models the non-trivial evidence is the closed-loop outcome
+of the intervened run, such as route completion, collisions, and lane
+invasions. The genuinely informative control-level decomposition exists only
+for InterFuser and NEAT, where multiple stage outputs feed the controller.
 
 ### Hard Benchmark Tier
 
@@ -630,9 +583,14 @@ The recorder exposes the creep so it can engage in the crawl regime:
   (overrides `config.creep_duration`).
 - `--debug-driving` / `--no-lidar-safe-check` remain available for diagnosis.
 
-With the settings below, TransFuser drives the route at a sustained ~4 m/s and
-completes ~85% of it (matching NEAT), so its stage deviations are measured on a
-properly moving ego:
+> The "~4 m/s, ~85% of the route" figures previously quoted here came from the
+> broken progress tracker described in the
+> [pipeline audit](docs/recorder_bug_audit.md). Post-fix, TransFuser covers 1.8 m
+> in 300 frames at 0.12 m/s with its default settings — the creep parameters below
+> have not yet been re-tuned against a correct route. Treat them as a starting
+> point, not a validated configuration.
+
+The creep settings are supplied like this:
 
 ```powershell
 # clean + gaussian-noise, anti-crawl creep engaged
@@ -851,6 +809,12 @@ MVP Phase 1 through the offline stressor layer are complete:
 
 The synthetic benchmark validates the SD2 diagnosis machinery on controlled
 offline logs; it does not replace real-model robustness experiments.
+
+**Live CARLA results are being re-recorded.** The
+[2026-07-10 pipeline audit](docs/recorder_bug_audit.md) found nine recorder
+defects, two of which invalidated every previously published live measurement. The
+recorders and the diagnosis machinery are fixed and covered by tests; the
+experiments themselves have not yet been re-run.
 
 ## Metric Config
 
