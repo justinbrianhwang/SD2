@@ -704,6 +704,7 @@ def main(argv: list[str] | None = None) -> int:
             world,
             blueprint_library,
             ego_vehicle,
+            delta=args.delta,
         )
         sensors = [*event_sensors, *interfuser_sensors]
 
@@ -1071,15 +1072,16 @@ def _attach_interfuser_sensors(
     world: Any,
     blueprint_library: Any,
     ego_vehicle: Any,
+    *,
+    delta: float,
 ) -> tuple[SensorBuffer, list[Any]]:
+    e2e.validate_sensor_ticks(INTERFUSER_SENSOR_SPECS, delta)
     active_specs = [spec for spec in INTERFUSER_SENSOR_SPECS if spec["type"] != "sensor.speedometer"]
     buffer = SensorBuffer([str(spec["id"]) for spec in active_specs])
     sensors: list[Any] = []
     for spec in active_specs:
         blueprint = blueprint_library.find(spec["type"])
-        for attr in ("width", "height", "fov", "sensor_tick", "reading_frequency"):
-            if attr in spec and blueprint.has_attribute(attr):
-                blueprint.set_attribute(attr, str(spec[attr]))
+        e2e.configure_sensor_blueprint(blueprint, spec)
         transform = modules.carla.Transform(
             modules.carla.Location(
                 x=float(spec.get("x", 0.0)),

@@ -46,6 +46,12 @@ DIRECT_LOOP_RECORDERS = (
     "transfuser_record.py",
 )
 
+SENSOR_TICK_GUARD_CALLS = (
+    "e2e.validate_sensor_ticks",
+    "e2e.attach_model_sensors",
+    "e2e.run_recording",
+)
+
 
 def _shared_flag_recorders() -> tuple[str, ...]:
     return tuple(
@@ -152,6 +158,15 @@ def test_all_recorders_route_accepted_anti_crawl_flag_to_live_drive_loop() -> No
     for recorder in COMMON_RUN_RECORDING_RECORDERS:
         calls = _call_names(recorder)
         assert "e2e.run_recording" in calls, f"{recorder} should reach AntiCrawlNudger via run_recording"
+
+
+@pytest.mark.parametrize("recorder", RECORDERS)
+def test_all_recorders_route_sensor_tick_guard(recorder: str) -> None:
+    calls = _call_names(recorder)
+
+    assert any(call in calls for call in SENSOR_TICK_GUARD_CALLS), (
+        f"{recorder} attaches sensors without reaching e2e.validate_sensor_ticks"
+    )
 
 
 @pytest.mark.parametrize("recorder", NPC_FLAG_RECORDERS)

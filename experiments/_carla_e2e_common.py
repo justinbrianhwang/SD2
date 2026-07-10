@@ -54,6 +54,51 @@ CILRS_PLANNING_ERROR = (
     "CILRS planning intervention is unsupported because CILRS has no planning "
     "stage; it regresses control directly."
 )
+SENSOR_SPEC_BOOKKEEPING_KEYS = frozenset(
+    {
+        "type",
+        "id",
+        "x",
+        "y",
+        "z",
+        "roll",
+        "pitch",
+        "yaw",
+        "sensor_tick",
+        "reading_frequency",
+    }
+)
+SENSOR_SPEC_ATTRIBUTE_ALIASES = {
+    "width": "image_size_x",
+    "height": "image_size_y",
+}
+OPTIONAL_SENSOR_SPEC_ATTRIBUTES = frozenset({"sensor_tick", "reading_frequency"})
+RGB_CAMERA_LEADERBOARD_ATTRIBUTES = {
+    "lens_circle_multiplier": 3.0,
+    "lens_circle_falloff": 3.0,
+    "chromatic_aberration_intensity": 0.5,
+    "chromatic_aberration_offset": 0,
+}
+LIDAR_RAY_CAST_SEMANTIC_LEADERBOARD_ATTRIBUTES = {
+    "range": 85,
+    "rotation_frequency": 10,
+    "channels": 64,
+    "upper_fov": 10,
+    "lower_fov": -30,
+    "points_per_second": 600000,
+}
+LIDAR_RAY_CAST_LEADERBOARD_ATTRIBUTES = {
+    **LIDAR_RAY_CAST_SEMANTIC_LEADERBOARD_ATTRIBUTES,
+    "atmosphere_attenuation_rate": 0.004,
+    "dropoff_general_rate": 0.45,
+    "dropoff_intensity_limit": 0.8,
+    "dropoff_zero_intensity": 0.4,
+}
+GNSS_LEADERBOARD_ATTRIBUTES = {
+    "noise_alt_bias": 0.0,
+    "noise_lat_bias": 0.0,
+    "noise_lon_bias": 0.0,
+}
 
 
 @dataclass(frozen=True)
@@ -952,6 +997,126 @@ def validate_sensor_ticks(sensor_specs: tuple[dict[str, Any], ...], delta: float
             )
 
 
+@dataclass(frozen=True)
+class BlueprintAttributeRequest:
+    value: Any
+    source_key: str | None
+    source_is_spec: bool
+    required: bool
+
+
+def _leaderboard_blueprint_attributes(sensor_type: str) -> dict[str, Any]:
+    if sensor_type.startswith("sensor.camera.semantic_segmentation"):
+        return {}
+    if sensor_type.startswith("sensor.camera.depth"):
+        return {}
+    if sensor_type.startswith("sensor.camera"):
+        return dict(RGB_CAMERA_LEADERBOARD_ATTRIBUTES)
+    if sensor_type.startswith("sensor.lidar.ray_cast_semantic"):
+        return dict(LIDAR_RAY_CAST_SEMANTIC_LEADERBOARD_ATTRIBUTES)
+    if sensor_type.startswith("sensor.lidar"):
+        return dict(LIDAR_RAY_CAST_LEADERBOARD_ATTRIBUTES)
+    if sensor_type.startswith("sensor.other.gnss"):
+        return dict(GNSS_LEADERBOARD_ATTRIBUTES)
+    return {}
+
+
+def _sensor_spec_attribute_name(key: str) -> str:
+    return SENSOR_SPEC_ATTRIBUTE_ALIASES.get(key, key)
+
+
+def _blueprint_attribute_type_name(attribute: Any) -> str:
+    attribute_type = getattr(attribute, "type", "")
+    type_name = getattr(attribute_type, "name", None)
+    if type_name is None:
+        type_name = str(attribute_type).rsplit(".", maxsplit=1)[-1]
+    return str(type_name).lower()
+
+
+def _expected_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes"}
+    return bool(value)
+
+
+def _blueprint_attribute_value(attribute: Any, requested_value: Any) -> tuple[Any, Any, str]:
+    type_name = _blueprint_attribute_type_name(attribute)
+    if type_name.endswith("int"):
+        return attribute.as_int(), int(requested_value), "as_int()"
+    if type_name.endswith("float"):
+        return attribute.as_float(), float(requested_value), "as_float()"
+    if type_name.endswith("bool"):
+        return attribute.as_bool(), _expected_bool(requested_value), "as_bool()"
+    return attribute.as_str(), str(requested_value), "as_str()"
+
+
+def _assert_blueprint_attribute_round_trip(
+    blueprint: Any,
+    sensor_id: str,
+    attr_name: str,
+    request: BlueprintAttributeRequest,
+) -> None:
+    attribute = blueprint.get_attribute(attr_name)
+    actual, expected, accessor = _blueprint_attribute_value(attribute, request.value)
+    if isinstance(expected, float):
+        # CARLA stores blueprint float attributes as binary32, so exact float64
+        # round-trips reject correctly-applied values that are not representable.
+        matches = math.isclose(float(actual), expected, rel_tol=1e-6, abs_tol=1e-6)
+    else:
+        matches = actual == expected
+    if matches:
+        return
+
+    source = (
+        f"spec key {request.source_key!r}"
+        if request.source_is_spec
+        else "leaderboard default"
+    )
+    raise ValueError(
+        f"sensor {sensor_id!r} blueprint attribute {attr_name!r} from {source} did not "
+        f"round-trip via {accessor}: requested {request.value!r}, got {actual!r}"
+    )
+
+
+def configure_sensor_blueprint(blueprint: Any, sensor_spec: Mapping[str, Any]) -> None:
+    """Apply leaderboard-equivalent blueprint attributes for a recorder sensor spec."""
+
+    sensor_type = str(sensor_spec["type"])
+    sensor_id = str(sensor_spec.get("id", sensor_type))
+    requests = {
+        attr_name: BlueprintAttributeRequest(
+            value=value,
+            source_key=None,
+            source_is_spec=False,
+            required=False,
+        )
+        for attr_name, value in _leaderboard_blueprint_attributes(sensor_type).items()
+    }
+
+    for key, value in sensor_spec.items():
+        if key in SENSOR_SPEC_BOOKKEEPING_KEYS and key not in OPTIONAL_SENSOR_SPEC_ATTRIBUTES:
+            continue
+        attr_name = _sensor_spec_attribute_name(str(key))
+        requests[attr_name] = BlueprintAttributeRequest(
+            value=value,
+            source_key=str(key),
+            source_is_spec=True,
+            required=str(key) not in OPTIONAL_SENSOR_SPEC_ATTRIBUTES,
+        )
+
+    for attr_name, request in requests.items():
+        if not blueprint.has_attribute(attr_name):
+            if request.required:
+                raise ValueError(
+                    f"sensor {sensor_id!r} spec key {request.source_key!r} maps to "
+                    f"blueprint attribute {attr_name!r}, but {sensor_type!r} has no such "
+                    "attribute"
+                )
+            continue
+        blueprint.set_attribute(attr_name, str(request.value))
+        _assert_blueprint_attribute_round_trip(blueprint, sensor_id, attr_name, request)
+
+
 def attach_model_sensors(
     modules: Any,
     world: Any,
@@ -969,9 +1134,7 @@ def attach_model_sensors(
     sensors: list[Any] = []
     for spec in active_specs:
         blueprint = blueprint_library.find(spec["type"])
-        for attr in ("width", "height", "fov", "sensor_tick", "reading_frequency"):
-            if attr in spec and blueprint.has_attribute(attr):
-                blueprint.set_attribute(attr, str(spec[attr]))
+        configure_sensor_blueprint(blueprint, spec)
         transform = modules.carla.Transform(
             modules.carla.Location(
                 x=float(spec.get("x", 0.0)),

@@ -1072,6 +1072,7 @@ def main(argv: list[str] | None = None) -> int:
             blueprint_library,
             ego_vehicle,
             runtime.sensor_specs(),
+            delta=args.delta,
         )
         sensors = [*event_sensors, *transfuser_sensors]
 
@@ -1447,15 +1448,16 @@ def _attach_transfuser_sensors(
     blueprint_library: Any,
     ego_vehicle: Any,
     sensor_specs: tuple[dict[str, Any], ...],
+    *,
+    delta: float,
 ) -> tuple[SensorBuffer, list[Any]]:
+    e2e.validate_sensor_ticks(sensor_specs, delta)
     active_specs = [spec for spec in sensor_specs if spec["type"] != "sensor.speedometer"]
     buffer = SensorBuffer([str(spec["id"]) for spec in active_specs])
     sensors: list[Any] = []
     for spec in active_specs:
         blueprint = blueprint_library.find(spec["type"])
-        for attr in ("width", "height", "fov", "sensor_tick", "reading_frequency"):
-            if attr in spec and blueprint.has_attribute(attr):
-                blueprint.set_attribute(attr, str(spec[attr]))
+        e2e.configure_sensor_blueprint(blueprint, spec)
         transform = modules.carla.Transform(
             modules.carla.Location(
                 x=float(spec.get("x", 0.0)),
