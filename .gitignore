@@ -33,3 +33,8 @@ Thumbs.db
 
 # Local E2E model repos + checkpoints (own licenses, large weights)
 models/
+
+# Recorder sidecars and sweep outputs (data, not results)
+data/carla/*.json
+data/carla/*.partial
+data/carla/sweep/

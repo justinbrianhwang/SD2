@@ -71,10 +71,25 @@ class OutcomeState(StateBase):
 
     collision: bool | None = None
     lane_invasion: bool | None = None
+    off_route: bool | None = None
     route_progress: float | None = None
     driving_score: float | None = None
     distance_to_goal: float | None = None
     min_ttc: float | None = None
+
+
+class InterventionState(StateBase):
+    """Counterfactual same-pose dual-forward intervention state."""
+
+    stage: str | None = None
+    direction: str | None = None
+    applied_source: str | None = None
+    control_from_stress_forward: dict[str, float] | None = None
+    control_from_clean_forward: dict[str, float] | None = None
+    control_hybrid_planning_clean: dict[str, float] | None = None
+    control_hybrid_semantic_clean: dict[str, float] | None = None
+    planning_waypoints_clean_forward: list[list[float]] | None = None
+    semantic_clean_forward: dict[str, Any] | None = None
 
 
 StageState: TypeAlias = (
@@ -84,6 +99,7 @@ StageState: TypeAlias = (
     | PlanningState
     | ControlState
     | OutcomeState
+    | InterventionState
 )
 
 STATE_MODEL_BY_STAGE: dict[Stage, type[StateBase]] = {
@@ -93,6 +109,7 @@ STATE_MODEL_BY_STAGE: dict[Stage, type[StateBase]] = {
     Stage.PLANNING: PlanningState,
     Stage.CONTROL: ControlState,
     Stage.OUTCOME: OutcomeState,
+    Stage.INTERVENTION: InterventionState,
 }
 
 

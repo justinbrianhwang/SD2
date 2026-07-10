@@ -18,9 +18,9 @@ from typing import Any
 
 from sd2.adapters.cilrs_adapter import (
     CILRS_MODEL_ID,
+    Sd2JsonlWriter,
     build_cilrs_run_metadata,
     cilrs_record_to_sd2,
-    write_sd2_jsonl,
 )
 from sd2.stressors import ImageStressor
 
@@ -118,7 +118,10 @@ class CILRSRuntime:
                 "roll": 0.0,
                 "pitch": 0.0,
                 "yaw": 0.0,
-                "sensor_tick": 0.05,
+                # Must fire on every tick. A sensor_tick equal to the world delta eventually
+                # skips a tick to floating-point accumulation, and the recorder then blocks
+                # forever waiting for that frame's reading.
+                "sensor_tick": 0.0,
                 "id": "imu",
             },
             {
@@ -129,7 +132,9 @@ class CILRSRuntime:
                 "roll": 0.0,
                 "pitch": 0.0,
                 "yaw": 0.0,
-                "sensor_tick": 0.01,
+                # Same trap as the imu: a sensor_tick at or above the world delta
+                # eventually skips a tick and the recorder blocks forever.
+                "sensor_tick": 0.0,
                 "id": "gps",
             },
             {"type": "sensor.speedometer", "reading_frequency": 20, "id": "speed"},
@@ -303,6 +308,7 @@ def main(argv: list[str] | None = None) -> int:
         argv,
         description="Record a CILRS synchronous CARLA run as SD2 JSONL.",
         default_checkpoint=DEFAULT_CHECKPOINT,
+        model_id=CILRS_MODEL_ID,
     )
     e2e.configure_logging()
     modules = _import_runtime_modules()
@@ -314,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
         model_label="CILRS",
         record_to_sd2=cilrs_record_to_sd2,
         build_run_metadata=build_cilrs_run_metadata,
-        write_sd2_jsonl=write_sd2_jsonl,
+        jsonl_writer_cls=Sd2JsonlWriter,
         logger=LOGGER,
     )
 

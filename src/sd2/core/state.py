@@ -2,6 +2,7 @@
 
 from sd2.core.schema import (
     ControlState,
+    InterventionState,
     OutcomeState,
     PlanningState,
     ReasoningState,
@@ -12,6 +13,7 @@ from sd2.core.schema import (
 
 __all__ = [
     "ControlState",
+    "InterventionState",
     "OutcomeState",
     "PlanningState",
     "ReasoningState",

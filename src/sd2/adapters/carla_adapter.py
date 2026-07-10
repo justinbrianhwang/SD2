@@ -7,14 +7,99 @@ plain Python measurements from CARLA and passes those dictionaries here.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, TextIO
 
 from sd2.core.schema import FrameLog, RunMetadata
 
 
 CARLA_MODEL_ID = "carla_basic_agent"
+LOGGER = logging.getLogger(__name__)
+
+
+class Sd2JsonlWriter:
+    """Stream schema-validated SD2 JSONL records through a partial file."""
+
+    def __init__(self, path: str | Path, metadata: dict[str, Any]) -> None:
+        self.path = Path(path)
+        self.partial_path = self.path.with_suffix(self.path.suffix + ".partial")
+        self._metadata_record = _validate_metadata_record(metadata)
+        self._run_id = str(self._metadata_record["run_id"])
+        self._handle: TextIO | None = None
+        self._closed = False
+
+        self.partial_path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = self.partial_path.open("w", encoding="utf-8")
+        self._write_record(self._metadata_record)
+        self._handle.flush()
+
+    def write_frame(self, frame: dict[str, Any]) -> None:
+        """Validate and append one frame record, then flush it."""
+
+        if self._closed or self._handle is None:
+            raise ValueError("cannot write to a closed SD2 JSONL writer")
+
+        frame_record = _validate_frame_record(frame)
+        if frame_record["run_id"] != self._run_id:
+            raise ValueError(
+                f"frame run_id {frame_record['run_id']!r} does not match "
+                f"metadata run_id {self._run_id!r}"
+            )
+
+        self._write_record(frame_record)
+        self._handle.flush()
+
+    def close(self) -> None:
+        """Close the partial file and atomically promote it to the final path."""
+
+        self._close(finalize=True)
+
+    def __enter__(self) -> "Sd2JsonlWriter":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object | None,
+    ) -> bool:
+        del exc, traceback
+        if exc_type is None:
+            self.close()
+        else:
+            try:
+                self._close(finalize=False)
+            except Exception:
+                LOGGER.exception(
+                    "Failed to close incomplete SD2 JSONL partial file %s",
+                    self.partial_path,
+                )
+            LOGGER.warning(
+                "SD2 JSONL run failed; partial file left at %s",
+                self.partial_path,
+            )
+        return False
+
+    def _write_record(self, record: dict[str, Any]) -> None:
+        if self._handle is None:
+            raise ValueError("cannot write to a closed SD2 JSONL writer")
+        self._handle.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+    def _close(self, *, finalize: bool) -> None:
+        if self._closed:
+            return
+        handle = self._handle
+        self._handle = None
+        self._closed = True
+
+        if handle is not None:
+            handle.close()
+
+        if finalize:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.partial_path.replace(self.path)
 
 
 def carla_frame_to_sd2(record: dict[str, Any], run_id: str) -> dict[str, Any]:
@@ -52,6 +137,8 @@ def carla_frame_to_sd2(record: dict[str, Any], run_id: str) -> dict[str, Any]:
     route_progress = _optional_float(record.get("route_progress"))
     if route_progress is not None:
         outcome["route_progress"] = _clamp(route_progress, 0.0, 1.0)
+    if record.get("off_route") is not None:
+        outcome["off_route"] = bool(record.get("off_route"))
     min_ttc = _optional_float(record.get("min_ttc"))
     if min_ttc is not None:
         outcome["min_ttc"] = min_ttc
@@ -112,21 +199,9 @@ def write_sd2_jsonl(
 ) -> None:
     """Write a schema-validated SD2 JSONL run file."""
 
-    metadata_record = _validate_metadata_record(metadata)
-    frame_records = [_validate_frame_record(frame) for frame in frames]
-    run_id = metadata_record["run_id"]
-    for frame in frame_records:
-        if frame["run_id"] != run_id:
-            raise ValueError(
-                f"frame run_id {frame['run_id']!r} does not match metadata run_id {run_id!r}"
-            )
-
-    output_path = Path(path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as handle:
-        handle.write(json.dumps(metadata_record, separators=(",", ":")) + "\n")
-        for frame in frame_records:
-            handle.write(json.dumps(frame, separators=(",", ":")) + "\n")
+    with Sd2JsonlWriter(path, metadata) as writer:
+        for frame in frames:
+            writer.write_frame(frame)
 
 
 def _validate_metadata_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -198,6 +273,7 @@ def _clamp(value: float, lower: float, upper: float) -> float:
 
 __all__ = [
     "CARLA_MODEL_ID",
+    "Sd2JsonlWriter",
     "build_carla_run_metadata",
     "carla_frame_to_sd2",
     "write_sd2_jsonl",

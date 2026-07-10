@@ -12,12 +12,14 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import os
 import random
 import re
 import sys
 import time
 import types
 import xml.etree.ElementTree as ET
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
@@ -25,20 +27,27 @@ from threading import Lock
 from typing import Any, Callable, Mapping
 
 from sd2.adapters.interfuser_adapter import (
+    Sd2JsonlWriter,
     build_interfuser_run_metadata,
     interfuser_record_to_sd2,
-    write_sd2_jsonl,
 )
 from sd2.stressors import ImageStressor, build_stressor, validate_severity
+
+try:
+    import _carla_e2e_common as e2e
+except ImportError:
+    from experiments import _carla_e2e_common as e2e
+
+RouteProgressTracker = e2e.RouteProgressTracker
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CARLA_PYTHON_API = (
     REPO_ROOT / "external" / "Carla" / "CARLA_0.9.16" / "PythonAPI" / "carla"
 )
-DEFAULT_CHECKPOINT = Path(
-    "F:/coding/Autonomous Vehicle/MARSHAL/Models/InterFuser_ckpt/interfuser.pth"
-)
+_CKPT_ENV = "INTERFUSER_CKPT"
+_CKPT_FROM_ENV = os.environ.get(_CKPT_ENV)
+DEFAULT_CHECKPOINT = Path(_CKPT_FROM_ENV) if _CKPT_FROM_ENV else None
 DEFAULT_TARGET_SPEED_KMH = 25.0
 LOGGER = logging.getLogger("interfuser_record")
 
@@ -103,7 +112,10 @@ INTERFUSER_SENSOR_SPECS: tuple[dict[str, Any], ...] = (
         "roll": 0.0,
         "pitch": 0.0,
         "yaw": 0.0,
-        "sensor_tick": 0.05,
+        # Must fire on every tick. A sensor_tick equal to the world delta (0.05)
+        # eventually skips a tick to floating-point accumulation, and the recorder
+        # then blocks forever waiting for that frame's reading.
+        "sensor_tick": 0.0,
         "id": "imu",
     },
     {
@@ -114,7 +126,9 @@ INTERFUSER_SENSOR_SPECS: tuple[dict[str, Any], ...] = (
         "roll": 0.0,
         "pitch": 0.0,
         "yaw": 0.0,
-        "sensor_tick": 0.01,
+        # Same trap as the imu: a sensor_tick at or above the world delta
+        # eventually skips a tick and the recorder blocks forever.
+        "sensor_tick": 0.0,
         "id": "gps",
     },
     {"type": "sensor.speedometer", "reading_frequency": 20, "id": "speed"},
@@ -191,40 +205,6 @@ class SensorBuffer:
         return packet
 
 
-class RouteProgressTracker:
-    def __init__(self, locations: list[Any]) -> None:
-        self.locations = locations
-        self.last_index = 0
-        self.initial_remaining = max(self._polyline_distance(locations), 1.0)
-
-    def reset_initial(self, current_location: Any) -> None:
-        self.initial_remaining = max(self.remaining_distance(current_location), 1.0)
-
-    def progress(self, current_location: Any) -> float:
-        remaining = self.remaining_distance(current_location)
-        return _clamp(1.0 - remaining / self.initial_remaining, 0.0, 1.0)
-
-    def remaining_distance(self, current_location: Any) -> float:
-        if not self.locations:
-            return 0.0
-        nearest_index = self._nearest_route_index(current_location)
-        self.last_index = max(self.last_index, nearest_index)
-        remaining = _distance(current_location, self.locations[self.last_index])
-        remaining += self._polyline_distance(self.locations[self.last_index :])
-        return remaining
-
-    def _nearest_route_index(self, current_location: Any) -> int:
-        start = max(0, self.last_index - 5)
-        candidates = range(start, len(self.locations))
-        return min(candidates, key=lambda idx: _distance(current_location, self.locations[idx]))
-
-    @staticmethod
-    def _polyline_distance(locations: list[Any]) -> float:
-        if len(locations) < 2:
-            return 0.0
-        return sum(_distance(left, right) for left, right in zip(locations, locations[1:]))
-
-
 class InterFuserRuntime:
     def __init__(
         self,
@@ -270,14 +250,21 @@ class InterFuserRuntime:
             need_scale=False,
         )
         self.controller = modules.InterfuserController(self.config)
-        self.tracker = modules.Tracker()
+        self.intervention = e2e.InterventionPolicy.from_args(args, "interfuser")
+        self.trackers = {
+            "clean_forward": modules.Tracker(),
+            "stress_forward": modules.Tracker(),
+        }
         self.route_planner = modules.RoutePlanner(4.0, 50.0)
         self.softmax = self.torch.nn.Softmax(dim=1)
         self.step = -1
         self.prev_lidar = None
         self.prev_control = None
         self.prev_extracted: dict[str, Any] | None = None
-        self.traffic_meta_moving_avg = self.np.zeros((400, 7), dtype=self.np.float32)
+        self.traffic_meta_moving_avg = {
+            "clean_forward": self.np.zeros((400, 7), dtype=self.np.float32),
+            "stress_forward": self.np.zeros((400, 7), dtype=self.np.float32),
+        }
         self.logged_shapes = False
 
     def set_global_plan(self, gps_plan: list[tuple[dict[str, float], Any]]) -> None:
@@ -292,19 +279,115 @@ class InterFuserRuntime:
         frame_id: int,
     ) -> tuple[Any, dict[str, Any]]:
         self.step += 1
-        if self.step % self.config.skip_frames != 0 and self.step > 4:
-            if self.prev_control is None or self.prev_extracted is None:
-                raise RuntimeError("InterFuser skip-frame path has no previous control")
-            return self.prev_control, dict(self.prev_extracted)
-
-        tick_data = self._tick(sensor_packet)
-        velocity = float(tick_data["speed"])
-        model_input = self._build_model_input(tick_data)
-        input_shapes = _shape_summary(model_input)
+        tick_clean = self._tick(sensor_packet)
+        tick_stress = self._with_stressed_images(tick_clean)
+        stress_input = self._build_model_input(tick_stress)
+        input_shapes = _shape_summary(stress_input)
         if not self.logged_shapes:
             LOGGER.info("First InterFuser sensor packet shapes: %s", _sensor_shape_summary(sensor_packet))
             LOGGER.info("First InterFuser model input shapes: %s", input_shapes)
 
+        stress_forward = self._forward_once(tick_stress, "stress_forward", stress_input, input_shapes)
+        clean_forward = self._forward_once(
+            tick_clean,
+            "clean_forward",
+            self._build_model_input(tick_clean),
+            input_shapes,
+        )
+        if not self.logged_shapes:
+            LOGGER.info("First InterFuser model output shapes: %s", _shape_summary(stress_forward["outputs"]))
+            self.logged_shapes = True
+
+        planning_forward = (
+            clean_forward
+            if self.intervention.source_for_stage("planning") == "clean_forward"
+            else stress_forward
+        )
+        semantic_forward = (
+            clean_forward
+            if self.intervention.source_for_stage("semantic") == "clean_forward"
+            else stress_forward
+        )
+        control_hybrid_planning_clean = None
+        control_hybrid_semantic_clean = None
+        if self.intervention.stage == "none":
+            control_hybrid_planning_clean, _planning_meta_infos = self._control_from_outputs(
+                float(tick_stress["speed"]),
+                clean_forward["pred_waypoints"],
+                stress_forward,
+                preserve_state=True,
+            )
+            control_hybrid_semantic_clean, _semantic_meta_infos = self._control_from_outputs(
+                float(tick_stress["speed"]),
+                stress_forward["pred_waypoints"],
+                clean_forward,
+                preserve_state=True,
+            )
+        applied_control, meta_infos = self._control_from_outputs(
+            float(tick_stress["speed"]),
+            planning_forward["pred_waypoints"],
+            semantic_forward,
+            preserve_state=False,
+        )
+
+        control = e2e.vehicle_control_from_dict(self.modules.carla, applied_control)
+
+        extracted = {
+            "vision": {
+                "image_mean": tick_stress["image_mean"],
+                "image_std": tick_stress["image_std"],
+                "feature": _pool_feature(self.np, stress_forward["bev_feature"]),
+                "feature_source": "mean_pooled_bev_feature",
+            },
+            "semantic": {
+                **_summarize_traffic_meta(self.modules, self.np, stress_forward["traffic_meta"]),
+                "junction": stress_forward["is_junction"],
+                "traffic_light_state": stress_forward["traffic_light_state"],
+                "stop_sign": stress_forward["stop_sign"],
+            },
+            "planning": {
+                "waypoints": stress_forward["pred_waypoints"].astype(float).tolist(),
+                "target_speed": _parse_target_speed(stress_forward["meta_infos"][0]),
+                "target_point": tick_stress["target_point"].astype(float).tolist(),
+                "command": int(tick_stress["next_command"]),
+            },
+            "control": {
+                "steer": float(control.steer),
+                "throttle": float(control.throttle),
+                "brake": float(control.brake),
+            },
+            "interfuser": {
+                "carla_frame": int(frame_id),
+                "controller_meta": [str(item) for item in meta_infos[:3]],
+                "safe_distance": float(meta_infos[3]),
+            },
+            "intervention": e2e.build_intervention_block(
+                self.intervention,
+                control_from_stress_forward=stress_forward["control"],
+                control_from_clean_forward=clean_forward["control"],
+                planning_waypoints_clean_forward=clean_forward["pred_waypoints"].astype(float).tolist(),
+                semantic_clean_forward={
+                    **_summarize_traffic_meta(self.modules, self.np, clean_forward["traffic_meta"]),
+                    "junction": clean_forward["is_junction"],
+                    "traffic_light_state": clean_forward["traffic_light_state"],
+                    "stop_sign": clean_forward["stop_sign"],
+                },
+                control_hybrid_planning_clean=control_hybrid_planning_clean,
+                control_hybrid_semantic_clean=control_hybrid_semantic_clean,
+            ),
+        }
+
+        self.prev_control = control
+        self.prev_extracted = dict(extracted)
+        return control, extracted
+
+    def _forward_once(
+        self,
+        tick_data: dict[str, Any],
+        source: str,
+        model_input: dict[str, Any],
+        input_shapes: dict[str, Any],
+    ) -> dict[str, Any]:
         try:
             with self.torch.no_grad():
                 outputs = self.net(model_input)
@@ -314,9 +397,6 @@ class InterFuserRuntime:
 
         if len(outputs) != 6:
             raise RuntimeError(f"InterFuser forward returned {len(outputs)} outputs, expected 6")
-        if not self.logged_shapes:
-            LOGGER.info("First InterFuser model output shapes: %s", _shape_summary(outputs))
-            self.logged_shapes = True
 
         (
             traffic_meta_tensor,
@@ -341,70 +421,63 @@ class InterFuserRuntime:
         )
 
         if self.step % 2 == 0 or self.step < 4:
-            traffic_meta = self.tracker.update_and_predict(
+            traffic_meta = self.trackers[source].update_and_predict(
                 traffic_meta.reshape(20, 20, -1),
                 tick_data["gps"],
                 tick_data["compass"],
                 self.step // 2,
             ).reshape(400, -1)
-            self.traffic_meta_moving_avg = (
-                self.config.momentum * self.traffic_meta_moving_avg
+            self.traffic_meta_moving_avg[source] = (
+                self.config.momentum * self.traffic_meta_moving_avg[source]
                 + (1 - self.config.momentum) * traffic_meta
             )
-        traffic_meta = self.traffic_meta_moving_avg
+        traffic_meta = self.traffic_meta_moving_avg[source]
 
-        steer, throttle, brake, meta_infos = self.controller.run_step(
+        result = {
+            "outputs": outputs,
+            "traffic_meta": traffic_meta,
+            "bev_feature": bev_feature,
+            "pred_waypoints": pred_waypoints,
+            "is_junction": is_junction,
+            "traffic_light_state": traffic_light_state,
+            "stop_sign": stop_sign,
+        }
+        control, meta_infos = self._control_from_outputs(
+            float(tick_data["speed"]),
+            pred_waypoints,
+            result,
+            preserve_state=True,
+        )
+        result["control"] = control
+        result["meta_infos"] = meta_infos
+        return result
+
+    def _control_from_outputs(
+        self,
+        velocity: float,
+        pred_waypoints: Any,
+        semantic: Mapping[str, Any],
+        *,
+        preserve_state: bool,
+    ) -> tuple[dict[str, float], Any]:
+        controller = deepcopy(self.controller) if preserve_state else self.controller
+        steer, throttle, brake, meta_infos = controller.run_step(
             velocity,
             pred_waypoints,
-            is_junction,
-            traffic_light_state,
-            stop_sign,
-            traffic_meta,
+            float(semantic["is_junction"]),
+            float(semantic["traffic_light_state"]),
+            float(semantic["stop_sign"]),
+            semantic["traffic_meta"],
         )
         if brake < 0.05:
             brake = 0.0
         if brake > 0.1:
             throttle = 0.0
-
-        control = self.modules.carla.VehicleControl()
-        control.steer = float(steer)
-        control.throttle = float(throttle)
-        control.brake = float(brake)
-
-        extracted = {
-            "vision": {
-                "image_mean": tick_data["image_mean"],
-                "image_std": tick_data["image_std"],
-                "feature": _pool_feature(self.np, bev_feature),
-                "feature_source": "mean_pooled_bev_feature",
-            },
-            "semantic": {
-                **_summarize_traffic_meta(self.modules, self.np, traffic_meta),
-                "junction": is_junction,
-                "traffic_light_state": traffic_light_state,
-                "stop_sign": stop_sign,
-            },
-            "planning": {
-                "waypoints": pred_waypoints.astype(float).tolist(),
-                "target_speed": _parse_target_speed(meta_infos[0]),
-                "target_point": tick_data["target_point"].astype(float).tolist(),
-                "command": int(tick_data["next_command"]),
-            },
-            "control": {
-                "steer": float(control.steer),
-                "throttle": float(control.throttle),
-                "brake": float(control.brake),
-            },
-            "interfuser": {
-                "carla_frame": int(frame_id),
-                "controller_meta": [str(item) for item in meta_infos[:3]],
-                "safe_distance": float(meta_infos[3]),
-            },
-        }
-
-        self.prev_control = control
-        self.prev_extracted = dict(extracted)
-        return control, extracted
+        return {
+            "steer": float(steer),
+            "throttle": float(throttle),
+            "brake": float(brake),
+        }, meta_infos
 
     def _tick(self, input_data: dict[str, tuple[int, Any]]) -> dict[str, Any]:
         rgb = self.cv2.cvtColor(input_data["rgb"][1][:, :, :3], self.cv2.COLOR_BGR2RGB)
@@ -416,9 +489,6 @@ class InterFuserRuntime:
             input_data["rgb_right"][1][:, :, :3],
             self.cv2.COLOR_BGR2RGB,
         )
-        rgb = self._apply_visual_stress(rgb)
-        rgb_left = self._apply_visual_stress(rgb_left)
-        rgb_right = self._apply_visual_stress(rgb_right)
 
         gps = input_data["gps"][1][:2]
         speed = float(input_data["speed"][1]["speed"])
@@ -471,6 +541,15 @@ class InterFuserRuntime:
         local_command_point = rotation.T.dot(local_command_point)
         result["target_point"] = local_command_point
         return result
+
+    def _with_stressed_images(self, tick_data: dict[str, Any]) -> dict[str, Any]:
+        stressed = dict(tick_data)
+        stressed["rgb"] = self._apply_visual_stress(tick_data["rgb"])
+        stressed["rgb_left"] = self._apply_visual_stress(tick_data["rgb_left"])
+        stressed["rgb_right"] = self._apply_visual_stress(tick_data["rgb_right"])
+        stressed["image_mean"] = float(stressed["rgb"].astype(self.np.float32).mean() / 255.0)
+        stressed["image_std"] = float(stressed["rgb"].astype(self.np.float32).std() / 255.0)
+        return stressed
 
     def _get_position(self, tick_data: dict[str, Any]) -> Any:
         gps = tick_data["gps"]
@@ -540,21 +619,30 @@ def main(argv: list[str] | None = None) -> int:
     _configure_logging()
     modules = _import_runtime_modules()
     stressor, stress_rng = _build_image_stressor(args, modules)
+    random.seed(args.seed)
     rng = random.Random(args.seed)
 
-    client = modules.carla.Client(args.host, args.port)
-    client.set_timeout(20.0)
-
+    client = None
     world = None
     traffic_manager = None
     ego_vehicle = None
     sensors: list[Any] = []
+    npc_vehicles: list[Any] = []
+    npc_walkers: list[Any] = []
+    npc_walker_controllers: list[Any] = []
+    scene_counts = {
+        "vehicles": {"requested": int(args.num_vehicles), "spawned": 0},
+        "walkers": {"requested": int(args.num_walkers), "spawned": 0},
+    }
     frames: list[dict[str, Any]] = []
     collision_frames: set[int] = set()
     lane_invasion_frames: set[int] = set()
     event_lock = Lock()
 
     try:
+        client = modules.carla.Client(args.host, args.port)
+        client.set_timeout(20.0)
+
         world = client.load_world(args.town)
         traffic_manager = client.get_trafficmanager()
         traffic_manager.set_synchronous_mode(True)
@@ -572,7 +660,11 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError(f"town {args.town!r} has no vehicle spawn points")
 
         spawn_index = _select_spawn_index(args.spawn_index, len(spawn_points))
-        destination_index = _select_destination_index(spawn_index, len(spawn_points))
+        destination_index = e2e.select_destination_index(
+            spawn_index,
+            len(spawn_points),
+            args.dest_index,
+        )
         ego_vehicle = _spawn_ego_vehicle(
             world,
             blueprint_library,
@@ -581,6 +673,22 @@ def main(argv: list[str] | None = None) -> int:
             rng,
         )
         world.tick()
+
+        npc_vehicles, npc_walkers, npc_walker_controllers = e2e.spawn_npc_traffic(
+            modules.carla,
+            world,
+            blueprint_library,
+            traffic_manager,
+            spawn_points,
+            ego_spawn_index=spawn_index,
+            num_vehicles=scene_counts["vehicles"]["requested"],
+            num_walkers=scene_counts["walkers"]["requested"],
+            seed=args.seed,
+            rng=rng,
+            logger=LOGGER,
+        )
+        scene_counts["vehicles"]["spawned"] = len(npc_vehicles)
+        scene_counts["walkers"]["spawned"] = len(npc_walkers)
 
         event_sensors = _attach_event_sensors(
             modules.carla,
@@ -611,16 +719,18 @@ def main(argv: list[str] | None = None) -> int:
 
         gps_plan = _build_sparse_gps_plan(world, route_transforms)
         route_locations = [transform.location for transform, _road_option in route_transforms]
+        route_length_meters = e2e.route_length(route_locations)
         progress_tracker = RouteProgressTracker(route_locations)
 
         runtime = InterFuserRuntime(args, modules, stressor, stress_rng)
         runtime.set_global_plan(gps_plan)
 
         LOGGER.info(
-            "Route ready: town=%s spawn=%d dest=%d dense_points=%d sparse_points=%d",
+            "Route ready: town=%s spawn=%d dest=%d route_length_m=%.1f dense_points=%d sparse_points=%d",
             args.town,
             spawn_index,
             destination_index,
+            route_length_meters,
             len(route_transforms),
             len(gps_plan),
         )
@@ -639,10 +749,11 @@ def main(argv: list[str] | None = None) -> int:
         progress_tracker.reset_initial(ego_vehicle.get_location())
 
         scenario_id = f"{args.town}_spawn{spawn_index}_dest{destination_index}"
-        condition = "clean" if args.stress == "none" else "stress"
-        stress_type = None if args.stress == "none" else args.stress
-        severity = 0 if args.stress == "none" else args.stress_severity
+        intervention_policy = e2e.InterventionPolicy.from_args(args, "interfuser")
+        condition, stress_type, severity = intervention_policy.metadata_condition
         run_id = _build_run_id(scenario_id, condition, stress_type, severity, args.seed)
+        if intervention_policy.enabled:
+            run_id = f"{run_id}_iv-{intervention_policy.direction}-{intervention_policy.stage}"
         metadata = build_interfuser_run_metadata(
             run_id=run_id,
             scenario_id=scenario_id,
@@ -653,33 +764,89 @@ def main(argv: list[str] | None = None) -> int:
             town=args.town,
         )
 
-        for frame_idx in range(args.frames):
-            frame_id = world.tick()
-            packet = sensor_buffer.read(frame_id)
-            packet["speed"] = (frame_id, {"speed": _ego_speed(ego_vehicle)})
-            control, extracted = runtime.run_step(
-                packet,
-                timestamp=frame_idx * args.delta,
-                frame_id=frame_id,
-            )
-            ego_vehicle.apply_control(control)
+        with Sd2JsonlWriter(args.output, metadata) as jsonl_writer:
+            for frame_idx in range(args.frames):
+                frame_id = world.tick()
+                packet = sensor_buffer.read(frame_id)
+                packet["speed"] = (frame_id, {"speed": _ego_speed(ego_vehicle)})
+                control, extracted = runtime.run_step(
+                    packet,
+                    timestamp=frame_idx * args.delta,
+                    frame_id=frame_id,
+                )
+                ego_vehicle.apply_control(control)
 
-            extracted["frame_idx"] = frame_idx
-            extracted["timestamp"] = round(frame_idx * args.delta, 6)
-            extracted["ego"] = _ego_measurement(ego_vehicle)
-            extracted["outcome"] = {
-                "collision": _event_seen(collision_frames, frame_id, event_lock),
-                "lane_invasion": _event_seen(lane_invasion_frames, frame_id, event_lock),
-                "route_progress": progress_tracker.progress(ego_vehicle.get_location()),
-                "min_ttc": None,
-            }
-            frames.append(interfuser_record_to_sd2(extracted, run_id=run_id))
+                current_location = ego_vehicle.get_location()
+                route_progress = progress_tracker.progress(current_location)
+                extracted["frame_idx"] = frame_idx
+                extracted["timestamp"] = round(frame_idx * args.delta, 6)
+                extracted["ego"] = _ego_measurement(ego_vehicle)
+                extracted["outcome"] = {
+                    "collision": _event_seen(collision_frames, frame_id, event_lock),
+                    "lane_invasion": _event_seen(lane_invasion_frames, frame_id, event_lock),
+                    "route_progress": route_progress,
+                    "off_route": progress_tracker.off_route,
+                    "min_ttc": None,
+                }
+                frame = interfuser_record_to_sd2(extracted, run_id=run_id)
+                jsonl_writer.write_frame(frame)
+                frames.append(frame)
 
-        write_sd2_jsonl(args.output, metadata, frames)
+        e2e.write_intervention_sidecar(args.output, intervention_policy)
+        e2e.write_scene_sidecar(
+            args.output,
+            town=args.town,
+            spawn_index=spawn_index,
+            dest_index=destination_index,
+            seed=args.seed,
+            vehicles=scene_counts["vehicles"],
+            walkers=scene_counts["walkers"],
+            frames=args.frames,
+            delta=args.delta,
+            route_length_meters=route_length_meters,
+        )
         _print_summary(args.output, frames)
         return 0
     finally:
-        _cleanup(modules.carla if "modules" in locals() else None, world, traffic_manager, sensors, ego_vehicle)
+        try:
+            e2e.cleanup(
+                modules.carla if "modules" in locals() else None,
+                world,
+                traffic_manager,
+                sensors,
+                ego_vehicle,
+                npc_vehicles,
+                npc_walkers,
+                npc_walker_controllers,
+            )
+        finally:
+            # Drop CARLA wrappers before frame teardown picks an arbitrary order.
+            extracted = None
+            _extracted = None
+            control = None
+            packet = None
+            runtime = None
+            progress_tracker = None
+            route_locations = None
+            gps_plan = None
+            route_transforms = None
+            route = None
+            basic_agent = None
+            destination = None
+            sensor_buffer = None
+            interfuser_sensors = None
+            event_sensors = None
+            sensors = []
+            npc_walker_controllers = []
+            npc_walkers = []
+            npc_vehicles = []
+            ego_vehicle = None
+            spawn_points = None
+            blueprint_library = None
+            settings = None
+            traffic_manager = None
+            world = None
+            client = None
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -693,7 +860,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--delta", type=float, default=0.05)
-    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=DEFAULT_CHECKPOINT,
+        required=DEFAULT_CHECKPOINT is None,
+        help=(
+            "Path to the InterFuser weights. Defaults to the $INTERFUSER_CKPT "
+            "environment variable; required when that is unset."
+        ),
+    )
     parser.add_argument(
         "--stress",
         choices=["none", "gaussian_noise", "motion_blur", "brightness", "fog"],
@@ -702,6 +878,25 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--stress-severity", type=int, default=3)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--spawn-index", type=int, default=0)
+    parser.add_argument(
+        "--dest-index",
+        type=int,
+        default=None,
+        help="optional destination spawn point index; omitted preserves the default opposite-spawn route",
+    )
+    parser.add_argument(
+        "--num-vehicles",
+        type=int,
+        default=0,
+        help="number of deterministic NPC vehicles to request (default 0)",
+    )
+    parser.add_argument(
+        "--num-walkers",
+        type=int,
+        default=0,
+        help="number of deterministic NPC walkers to request (default 0)",
+    )
+    e2e.add_intervention_args(parser)
     args = parser.parse_args(argv)
     if args.frames < 0:
         parser.error("--frames must be non-negative")
@@ -709,11 +904,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--warmup must be non-negative")
     if args.delta <= 0:
         parser.error("--delta must be positive")
+    if args.num_vehicles < 0:
+        parser.error("--num-vehicles must be non-negative")
+    if args.num_walkers < 0:
+        parser.error("--num-walkers must be non-negative")
     if args.stress != "none":
         try:
             validate_severity(args.stress_severity)
         except ValueError as exc:
             parser.error(str(exc))
+    e2e.validate_intervention_args(parser, args, "interfuser")
     return args
 
 
@@ -1059,7 +1259,11 @@ def _location_to_gps(lat_ref: float, lon_ref: float, location: Any) -> dict[str,
     mx = scale * lon_ref * math.pi * earth_radius_equator / 180.0
     my = scale * earth_radius_equator * math.log(math.tan((90.0 + lat_ref) * math.pi / 360.0))
     mx += location.x
-    my -= location.y
+    # CARLA 0.9.16's GNSS sensor reports latitude increasing with +y. The CARLA 0.9.10
+    # leaderboard code this was ported from negated y here; keeping that negation
+    # mirrors the whole global plan about y=0, so next_wp -- and therefore
+    # target_point -- points at a reflected goal and the ego drives off route.
+    my += location.y
     lon = mx * 180.0 / (math.pi * earth_radius_equator * scale)
     lat = 360.0 * math.atan(math.exp(my / (earth_radius_equator * scale))) / math.pi - 90.0
     return {"lat": lat, "lon": lon, "z": location.z}
@@ -1248,10 +1452,6 @@ def _distance(left: Any, right: Any) -> float:
     return math.sqrt(
         (left.x - right.x) ** 2 + (left.y - right.y) ** 2 + (left.z - right.z) ** 2
     )
-
-
-def _clamp(value: float, lower: float, upper: float) -> float:
-    return min(upper, max(lower, value))
 
 
 if __name__ == "__main__":

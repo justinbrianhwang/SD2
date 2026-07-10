@@ -14,6 +14,10 @@ from sd2.analysis.calibration import (
     format_calibrated_threshold_table,
 )
 from sd2.analysis.pipeline import run_analysis
+from sd2.analysis.intervention import (
+    run_intervention_analysis,
+    run_single_run_share_analysis,
+)
 from sd2.analysis.robustness_stats import (
     aggregate_run_statistics,
     discover_analysis_dirs,
@@ -153,6 +157,32 @@ def build_parser() -> argparse.ArgumentParser:
         default="realistic",
         help="synthetic benchmark profile, default: realistic",
     )
+
+    intervention = subparsers.add_parser(
+        "intervention",
+        help="analyze a counterfactual stage-intervention run",
+    )
+    intervention.add_argument(
+        "--baseline-clean",
+        help="path to the baseline clean run JSONL",
+    )
+    intervention.add_argument("--stress", help="path to stress run JSONL")
+    intervention.add_argument(
+        "--intervened",
+        help="path to intervened run JSONL",
+    )
+    intervention.add_argument(
+        "--none-run",
+        help="single --intervene-stage none run JSONL for common-denominator stage shares",
+    )
+    intervention.add_argument(
+        "--clean-replicates",
+        nargs="*",
+        default=[],
+        help="optional clean replicate JSONL paths for outcome recovery noise-floor calibration",
+    )
+    intervention.add_argument("--config", help="path to YAML config")
+    intervention.add_argument("--output", required=True, help="output directory")
     return parser
 
 
@@ -176,6 +206,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_stress(args)
     if args.command == "benchmark":
         return _run_benchmark(args)
+    if args.command == "intervention":
+        return _run_intervention(args)
 
     parser.print_help()
     return 0
@@ -285,6 +317,39 @@ def _run_benchmark(args: argparse.Namespace) -> int:
         return 2
 
     print(headline_accuracy(result))
+    return 0
+
+
+def _run_intervention(args: argparse.Namespace) -> int:
+    try:
+        if args.none_run:
+            output = run_single_run_share_analysis(
+                none_run=args.none_run,
+                output_dir=args.output,
+            )
+        else:
+            missing = [
+                name
+                for name in ("baseline_clean", "stress", "intervened", "config")
+                if getattr(args, name) is None
+            ]
+            if missing:
+                formatted = ", ".join(f"--{name.replace('_', '-')}" for name in missing)
+                raise ValueError(f"intervention analysis requires {formatted}")
+            output = run_intervention_analysis(
+                baseline_clean=args.baseline_clean,
+                stress=args.stress,
+                intervened=args.intervened,
+                config_path=args.config,
+                output_dir=args.output,
+                clean_replicates=args.clean_replicates,
+            )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"Wrote {output.json_path}")
+    print(f"Wrote {output.markdown_path}")
     return 0
 
 

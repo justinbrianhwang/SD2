@@ -64,6 +64,7 @@ def test_transfuser_record_to_sd2_validates_all_observed_stages() -> None:
             "outcome": {
                 "collision": False,
                 "lane_invasion": True,
+                "off_route": True,
                 "route_progress": 0.25,
                 "min_ttc": 3.2,
             },
@@ -113,6 +114,7 @@ def test_transfuser_record_to_sd2_validates_all_observed_stages() -> None:
     outcome = frame.states[Stage.OUTCOME]
     assert outcome.collision is False
     assert outcome.lane_invasion is True
+    assert outcome.off_route is True
     assert outcome.route_progress == 0.25
     assert outcome.min_ttc == 3.2
 

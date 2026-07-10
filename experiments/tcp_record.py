@@ -27,9 +27,9 @@ from typing import Any
 
 from sd2.adapters.tcp_adapter import (
     TCP_MODEL_ID,
+    Sd2JsonlWriter,
     build_tcp_run_metadata,
     tcp_record_to_sd2,
-    write_sd2_jsonl,
 )
 from sd2.stressors import ImageStressor, validate_severity
 
@@ -159,6 +159,7 @@ class TCPRuntime:
             ]
         )
         self.route_planner = SD2RoutePlanner(self.np, 4.0, 50.0)
+        self.intervention = e2e.InterventionPolicy.from_args(args, TCP_MODEL_ID)
         self.step = -1
         self.logged_shapes = False
         self.logged_bad_command = False
@@ -190,7 +191,10 @@ class TCPRuntime:
                 "roll": 0.0,
                 "pitch": 0.0,
                 "yaw": 0.0,
-                "sensor_tick": 0.05,
+                # Must fire on every tick. A sensor_tick equal to the world delta eventually
+                # skips a tick to floating-point accumulation, and the recorder then blocks
+                # forever waiting for that frame's reading.
+                "sensor_tick": 0.0,
                 "id": "imu",
             },
             {
@@ -201,7 +205,9 @@ class TCPRuntime:
                 "roll": 0.0,
                 "pitch": 0.0,
                 "yaw": 0.0,
-                "sensor_tick": 0.01,
+                # Same trap as the imu: a sensor_tick at or above the world delta
+                # eventually skips a tick and the recorder blocks forever.
+                "sensor_tick": 0.0,
                 "id": "gps",
             },
             {"type": "sensor.speedometer", "reading_frequency": 20, "id": "speed"},
@@ -220,33 +226,13 @@ class TCPRuntime:
     ) -> tuple[Any, dict[str, Any]]:
         del timestamp
         self.step += 1
-        tick_data = self._tick(sensor_packet)
-        rgb_tensor = self._rgb_tensor(tick_data["rgb"])
-        gt_velocity = self.torch.tensor(
-            [tick_data["speed"]],
-            device=self.device,
-            dtype=self.torch.float32,
-        )
-        target_point = self.torch.tensor(
-            [[tick_data["target_point"][0], tick_data["target_point"][1]]],
-            device=self.device,
-            dtype=self.torch.float32,
-        )
-        command_index = self._command_index(tick_data["next_command"])
-        cmd_one_hot = self.torch.zeros((1, 6), device=self.device, dtype=self.torch.float32)
-        cmd_one_hot[0, command_index] = 1.0
-        speed_state = self.torch.tensor(
-            [[float(tick_data["speed"]) / 12.0]],
-            device=self.device,
-            dtype=self.torch.float32,
-        )
-        state = self.torch.cat([speed_state, target_point, cmd_one_hot], dim=1)
+        tick_clean = self._tick(sensor_packet)
+        tick_stress = self._with_stressed_image(tick_clean)
 
         input_shapes = {
-            "rgb": e2e.shape_summary(rgb_tensor),
-            "state": e2e.shape_summary(state),
-            "target_point": e2e.shape_summary(target_point),
-            "gt_velocity": e2e.shape_summary(gt_velocity),
+            "rgb": "clean/stress dual tensors",
+            "target_point": e2e.shape_summary(tick_stress["target_point"]),
+            "gt_velocity": e2e.shape_summary(tick_stress["speed"]),
         }
         if not self.logged_shapes:
             LOGGER.info("First TCP sensor packet shapes: %s", e2e.sensor_shape_summary(sensor_packet))
@@ -257,75 +243,56 @@ class TCPRuntime:
             control.steer = 0.0
             control.throttle = 0.0
             control.brake = 0.0
-            return control, self._warmup_record(tick_data, control, frame_id)
+            return control, self._warmup_record(tick_stress, control, frame_id)
 
-        self.perception_feature = None
-        try:
-            with self.torch.no_grad():
-                pred = self.net(rgb_tensor, state, target_point)
-        except Exception:
-            LOGGER.exception("TCP forward failed; model input shapes were: %s", input_shapes)
-            raise
-
-        pred_wp = pred["pred_wp"]
-        pred_wp_np = pred_wp.detach().cpu().numpy()[0].copy()
-        # process_action does float(speed.cpu().numpy()); numpy>=2 rejects that on
-        # a shape-(1,) array, so hand it a 0-dim scalar tensor. control_pid below
-        # still needs the shape-(1,) tensor because it indexes velocity[0].
-        steer_ctrl, throttle_ctrl, brake_ctrl, ctrl_metadata = self.net.process_action(
-            pred,
-            int(tick_data["next_command"]),
-            gt_velocity.reshape(()),
-            target_point,
+        stress_forward = self._forward_once(tick_stress, input_shapes)
+        clean_forward = self._forward_once(tick_clean, input_shapes)
+        control_hybrid_planning_clean = (
+            clean_forward["control"] if self.intervention.stage == "none" else None
         )
-        steer_traj, throttle_traj, brake_traj, traj_metadata = self.net.control_pid(
-            pred_wp.detach().clone(),
-            gt_velocity.detach().clone(),
-            target_point.detach().clone(),
+        applied_forward = clean_forward if self.intervention.applied_source == "clean_forward" else stress_forward
+        applied_control, applied_details = self._control_from_prediction(
+            applied_forward["pred"],
+            applied_forward["pred_wp"],
+            applied_forward["gt_velocity"],
+            applied_forward["target_point"],
+            applied_forward["next_command"],
+            applied_forward["speed"],
+            preserve_state=False,
         )
-
-        traj_branch = {
-            "steer": e2e.scalar_float(steer_traj),
-            "throttle": e2e.scalar_float(throttle_traj),
-            "brake": e2e.scalar_float(brake_traj),
+        applied_forward = {
+            **applied_forward,
+            "control": applied_control,
+            "control_details": applied_details,
         }
-        ctrl_branch = {
-            "steer": e2e.scalar_float(steer_ctrl),
-            "throttle": e2e.scalar_float(throttle_ctrl),
-            "brake": e2e.scalar_float(brake_ctrl),
-        }
-        selected = self._select_control(traj_branch, ctrl_branch)
-        pre_clamp = dict(selected)
-        post_clamp = self._apply_tcp_clamps(selected, float(tick_data["speed"]))
 
         control = self.modules.carla.VehicleControl()
-        control.steer = float(post_clamp["steer"])
-        control.throttle = float(post_clamp["throttle"])
-        control.brake = float(post_clamp["brake"])
+        control.steer = float(applied_control["steer"])
+        control.throttle = float(applied_control["throttle"])
+        control.brake = float(applied_control["brake"])
 
-        feature_np = None
-        if self.perception_feature is not None:
-            feature_np = self.perception_feature.detach().cpu().numpy()
+        pred_wp_np = stress_forward["pred_wp_np"]
+        feature_np = stress_forward["feature_np"]
         if not self.logged_shapes:
             LOGGER.info(
                 "First TCP model output shapes: %s",
                 {
-                    "perception_feature": e2e.shape_summary(self.perception_feature),
-                    "pred": e2e.shape_summary(pred),
+                    "perception_feature": e2e.shape_summary(stress_forward["feature"]),
+                    "pred": e2e.shape_summary(stress_forward["pred"]),
                     "feature_source": "mean_pooled_perception_feature",
                     "planner_type": self.args.planner_type,
                 },
             )
             self.logged_shapes = True
 
-        target_speed = e2e.optional_float(traj_metadata.get("desired_speed"))
+        target_speed = e2e.optional_float(stress_forward["control_details"]["traj_metadata"].get("desired_speed"))
         if target_speed is None:
             target_speed = e2e.target_speed_from_waypoints(self.np, pred_wp_np)
 
         extracted = {
             "vision": {
-                "image_mean": tick_data["image_mean"],
-                "image_std": tick_data["image_std"],
+                "image_mean": tick_stress["image_mean"],
+                "image_std": tick_stress["image_std"],
                 "feature": (
                     e2e.pool_feature(self.np, feature_np)
                     if feature_np is not None
@@ -341,8 +308,8 @@ class TCPRuntime:
             "planning": {
                 "waypoints": pred_wp_np.astype(float).tolist(),
                 "target_speed": target_speed,
-                "target_point": tick_data["target_point"].astype(float).tolist(),
-                "command": int(tick_data["next_command"]),
+                "target_point": tick_stress["target_point"].astype(float).tolist(),
+                "command": int(tick_stress["next_command"]),
                 "planning_source": "pred_wp",
             },
             "control": {
@@ -352,18 +319,25 @@ class TCPRuntime:
                 "planner_type": self.args.planner_type,
                 "details": {
                     "selected_branch": self.args.planner_type,
-                    "traj_branch": traj_branch,
-                    "ctrl_branch": ctrl_branch,
-                    "pre_clamp": pre_clamp,
-                    "post_clamp": post_clamp,
-                    "traj_metadata": e2e.jsonable(traj_metadata),
-                    "ctrl_metadata": e2e.jsonable(ctrl_metadata),
+                    "traj_branch": applied_details["traj_branch"],
+                    "ctrl_branch": applied_details["ctrl_branch"],
+                    "pre_clamp": applied_details["pre_clamp"],
+                    "post_clamp": applied_details["post_clamp"],
+                    "traj_metadata": e2e.jsonable(applied_details["traj_metadata"]),
+                    "ctrl_metadata": e2e.jsonable(applied_details["ctrl_metadata"]),
                 },
             },
             "tcp": {
                 "carla_frame": int(frame_id),
                 "input_simplification": "single_front_rgb_256x900",
             },
+            "intervention": e2e.build_intervention_block(
+                self.intervention,
+                control_from_stress_forward=stress_forward["control"],
+                control_from_clean_forward=clean_forward["control"],
+                planning_waypoints_clean_forward=clean_forward["pred_wp_np"].astype(float).tolist(),
+                control_hybrid_planning_clean=control_hybrid_planning_clean,
+            ),
         }
         return control, extracted
 
@@ -408,12 +382,6 @@ class TCPRuntime:
             input_data["rgb_front"][1][:, :, :3],
             self.cv2.COLOR_BGR2RGB,
         )
-        rgb = e2e.apply_visual_stress(
-            rgb,
-            self.stressor,
-            self.args.stress_severity,
-            self.stress_rng,
-        )
         if rgb.shape[:2] != (256, 900):
             rgb = self.cv2.resize(rgb, (900, 256), interpolation=self.cv2.INTER_LINEAR)
 
@@ -436,6 +404,139 @@ class TCPRuntime:
             "target_point": target_point,
             "image_mean": float(rgb_float.mean() / 255.0),
             "image_std": float(rgb_float.std() / 255.0),
+        }
+
+    def _with_stressed_image(self, tick_data: dict[str, Any]) -> dict[str, Any]:
+        stressed = dict(tick_data)
+        rgb = e2e.apply_visual_stress(
+            tick_data["rgb"],
+            self.stressor,
+            self.args.stress_severity,
+            self.stress_rng,
+        )
+        if rgb.shape[:2] != (256, 900):
+            rgb = self.cv2.resize(rgb, (900, 256), interpolation=self.cv2.INTER_LINEAR)
+        rgb_float = rgb.astype(self.np.float32)
+        stressed["rgb"] = rgb
+        stressed["image_mean"] = float(rgb_float.mean() / 255.0)
+        stressed["image_std"] = float(rgb_float.std() / 255.0)
+        return stressed
+
+    def _forward_once(
+        self,
+        tick_data: dict[str, Any],
+        input_shapes: dict[str, Any],
+    ) -> dict[str, Any]:
+        rgb_tensor = self._rgb_tensor(tick_data["rgb"])
+        gt_velocity = self.torch.tensor(
+            [tick_data["speed"]],
+            device=self.device,
+            dtype=self.torch.float32,
+        )
+        target_point = self.torch.tensor(
+            [[tick_data["target_point"][0], tick_data["target_point"][1]]],
+            device=self.device,
+            dtype=self.torch.float32,
+        )
+        command_index = self._command_index(tick_data["next_command"])
+        cmd_one_hot = self.torch.zeros((1, 6), device=self.device, dtype=self.torch.float32)
+        cmd_one_hot[0, command_index] = 1.0
+        speed_state = self.torch.tensor(
+            [[float(tick_data["speed"]) / 12.0]],
+            device=self.device,
+            dtype=self.torch.float32,
+        )
+        state = self.torch.cat([speed_state, target_point, cmd_one_hot], dim=1)
+
+        self.perception_feature = None
+        try:
+            with self.torch.no_grad():
+                pred = self.net(rgb_tensor, state, target_point)
+        except Exception:
+            LOGGER.exception("TCP forward failed; model input shapes were: %s", input_shapes)
+            raise
+
+        pred_wp = pred["pred_wp"]
+        pred_wp_np = pred_wp.detach().cpu().numpy()[0].copy()
+        feature = self.perception_feature
+        feature_np = feature.detach().cpu().numpy() if feature is not None else None
+        control, details = self._control_from_prediction(
+            pred,
+            pred_wp,
+            gt_velocity,
+            target_point,
+            int(tick_data["next_command"]),
+            float(tick_data["speed"]),
+            preserve_state=True,
+        )
+        return {
+            "pred": pred,
+            "pred_wp": pred_wp,
+            "pred_wp_np": pred_wp_np,
+            "gt_velocity": gt_velocity,
+            "target_point": target_point,
+            "next_command": int(tick_data["next_command"]),
+            "speed": float(tick_data["speed"]),
+            "feature": feature,
+            "feature_np": feature_np,
+            "control": control,
+            "control_details": details,
+        }
+
+    def _control_from_prediction(
+        self,
+        pred: Mapping[str, Any],
+        pred_wp: Any,
+        gt_velocity: Any,
+        target_point: Any,
+        next_command: int,
+        speed: float,
+        *,
+        preserve_state: bool,
+    ) -> tuple[dict[str, float], dict[str, Any]]:
+        pid_state = e2e.snapshot_pid_controllers(self.net) if preserve_state else {}
+        # process_action does float(speed.cpu().numpy()); numpy>=2 rejects that on
+        # a shape-(1,) array, so hand it a 0-dim scalar tensor. control_pid below
+        # still needs the shape-(1,) tensor because it indexes velocity[0].
+        steer_ctrl, throttle_ctrl, brake_ctrl, ctrl_metadata = self.net.process_action(
+            pred,
+            int(next_command),
+            gt_velocity.reshape(()),
+            target_point,
+        )
+        steer_traj, throttle_traj, brake_traj, traj_metadata = self.net.control_pid(
+            pred_wp.detach().clone(),
+            gt_velocity.detach().clone(),
+            target_point.detach().clone(),
+        )
+        if preserve_state:
+            e2e.restore_pid_controllers(self.net, pid_state)
+
+        traj_branch = {
+            "steer": e2e.scalar_float(steer_traj),
+            "throttle": e2e.scalar_float(throttle_traj),
+            "brake": e2e.scalar_float(brake_traj),
+        }
+        ctrl_branch = {
+            "steer": e2e.scalar_float(steer_ctrl),
+            "throttle": e2e.scalar_float(throttle_ctrl),
+            "brake": e2e.scalar_float(brake_ctrl),
+        }
+        selected = self._select_control(traj_branch, ctrl_branch)
+        pre_clamp = dict(selected)
+        post_clamp = self._apply_tcp_clamps(selected, speed)
+        control = {
+            "steer": float(post_clamp["steer"]),
+            "throttle": float(post_clamp["throttle"]),
+            "brake": float(post_clamp["brake"]),
+        }
+        return control, {
+            "traj_branch": traj_branch,
+            "ctrl_branch": ctrl_branch,
+            "pre_clamp": pre_clamp,
+            "post_clamp": post_clamp,
+            "traj_metadata": traj_metadata,
+            "ctrl_metadata": ctrl_metadata,
         }
 
     def _rgb_tensor(self, rgb: Any) -> Any:
@@ -510,6 +611,7 @@ class TCPRuntime:
         }
 
     def _warmup_record(self, tick_data: dict[str, Any], control: Any, frame_id: int) -> dict[str, Any]:
+        neutral = e2e.control_to_dict(control)
         return {
             "vision": {
                 "image_mean": tick_data["image_mean"],
@@ -536,6 +638,12 @@ class TCPRuntime:
                 "warmup": True,
                 "input_simplification": "single_front_rgb_256x900",
             },
+            "intervention": e2e.build_intervention_block(
+                self.intervention,
+                control_from_stress_forward=neutral,
+                control_from_clean_forward=neutral,
+                planning_waypoints_clean_forward=None,
+            ),
         }
 
 
@@ -552,7 +660,7 @@ def main(argv: list[str] | None = None) -> int:
         model_label="TCP",
         record_to_sd2=tcp_record_to_sd2,
         build_run_metadata=build_tcp_run_metadata,
-        write_sd2_jsonl=write_sd2_jsonl,
+        jsonl_writer_cls=Sd2JsonlWriter,
         logger=LOGGER,
     )
 
@@ -574,6 +682,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--stress-severity", type=int, default=3)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--spawn-index", type=int, default=0)
+    e2e.add_intervention_args(parser)
     # Anti-crawl driving aid (see experiments/_carla_e2e_common.run_recording).
     parser.add_argument("--anti-crawl", action="store_true")
     parser.add_argument("--creep-speed", type=float, default=2.0)
@@ -592,6 +701,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             validate_severity(args.stress_severity)
         except ValueError as exc:
             parser.error(str(exc))
+    e2e.validate_intervention_args(parser, args, TCP_MODEL_ID)
     return args
 
 

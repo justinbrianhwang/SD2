@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sd2.adapters import transfuser_adapter as _tf
-from sd2.adapters.carla_adapter import write_sd2_jsonl
+from sd2.adapters.carla_adapter import Sd2JsonlWriter, write_sd2_jsonl
 from sd2.core.schema import FrameLog, RunMetadata
 
 
@@ -96,6 +96,7 @@ def _planning_state(record: Any, ego_record: Any) -> dict[str, Any]:
 
 __all__ = [
     "CILRS_MODEL_ID",
+    "Sd2JsonlWriter",
     "build_cilrs_run_metadata",
     "cilrs_record_to_sd2",
     "write_sd2_jsonl",

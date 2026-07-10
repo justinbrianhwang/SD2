@@ -8,11 +8,14 @@ time. Model recorder scripts import heavy runtime packages inside guarded
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import math
 import random
 import time
 import xml.etree.ElementTree as ET
+from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Lock
@@ -27,6 +30,168 @@ CARLA_PYTHON_API = (
 )
 DEFAULT_TARGET_SPEED_KMH = 25.0
 STRESS_CHOICES = ["none", "gaussian_noise", "motion_blur", "brightness", "fog"]
+INTERVENTION_STAGE_CHOICES = ("none", "planning", "semantic")
+INTERVENTION_DIRECTION_CHOICES = ("restore", "inject")
+INTERVENTION_SUPPORT: dict[str, set[str]] = {
+    "interfuser": {"planning", "semantic"},
+    "neat": {"planning", "semantic"},
+    "transfuser": {"planning"},
+    "aim": {"planning"},
+    "tcp": {"planning"},
+    "cilrs": set(),
+}
+SINGLE_INPUT_CONTROLLER_MODELS = {"aim", "tcp", "transfuser"}
+MULTI_INPUT_CONTROLLER_MODELS = {"interfuser", "neat"}
+TRANSFUSER_SEMANTIC_ERROR = (
+    "TransFuser semantic intervention is structurally vacuous: the detection "
+    "head is off the causal path to control."
+)
+PLANNING_ONLY_SEMANTIC_ERROR = (
+    "{model_label} semantic intervention is unsupported because this recorder "
+    "has no semantic head on the causal path to control."
+)
+CILRS_PLANNING_ERROR = (
+    "CILRS planning intervention is unsupported because CILRS has no planning "
+    "stage; it regresses control directly."
+)
+
+
+@dataclass(frozen=True)
+class InterventionPolicy:
+    """Counterfactual stage-intervention policy for same-pose dual-forward runs.
+
+    The recorder always logs all-stress and all-clean forward candidates. For
+    InterFuser and NEAT, controller-level stage swaps are empirical because the
+    controller consumes both planning and semantic outputs. For AIM, TCP, and
+    TransFuser, control is a deterministic function of planning and velocity;
+    planning restoration therefore restores per-tick control arithmetically.
+    Those single-input controllers are only informative at the closed-loop
+    outcome level.
+    """
+
+    model_id: str
+    stage: str
+    direction: str | None
+    stress_type: str | None
+    stress_severity: int
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace, model_id: str) -> "InterventionPolicy":
+        stage = str(getattr(args, "intervene_stage", "none") or "none")
+        direction = str(getattr(args, "intervene_direction", "restore") or "restore")
+        stress_type = getattr(args, "stress", "none")
+        severity = int(getattr(args, "stress_severity", 0) or 0)
+        policy = cls(
+            model_id=str(model_id),
+            stage=stage,
+            direction=None if stage == "none" else direction,
+            stress_type=None if stress_type in (None, "", "none") else str(stress_type),
+            stress_severity=0 if stress_type in (None, "", "none") else severity,
+        )
+        policy.validate()
+        return policy
+
+    @property
+    def enabled(self) -> bool:
+        return self.stage != "none"
+
+    @property
+    def is_restore(self) -> bool:
+        return self.direction == "restore"
+
+    @property
+    def is_inject(self) -> bool:
+        return self.direction == "inject"
+
+    @property
+    def base_source(self) -> str:
+        return "clean_forward" if self.is_inject else "stress_forward"
+
+    @property
+    def applied_source(self) -> str:
+        if not self.enabled:
+            return "stress_forward"
+        return "clean_forward" if self.is_restore else "stress_forward"
+
+    @property
+    def metadata_condition(self) -> tuple[str, str | None, int]:
+        if self.is_inject:
+            return "clean", None, 0
+        if self.stress_type is None:
+            return "clean", None, 0
+        return "stress", self.stress_type, self.stress_severity
+
+    def source_for_stage(self, stage: str) -> str:
+        normalized_stage = str(stage)
+        if not self.enabled:
+            return "stress_forward"
+        if normalized_stage == self.stage:
+            return self.applied_source
+        return self.base_source
+
+    def validate(self) -> None:
+        normalized_model = self.model_id.lower()
+        if self.stage not in INTERVENTION_STAGE_CHOICES:
+            allowed = ", ".join(INTERVENTION_STAGE_CHOICES)
+            raise ValueError(f"unsupported intervention stage {self.stage!r}; expected one of: {allowed}")
+        if self.direction is not None and self.direction not in INTERVENTION_DIRECTION_CHOICES:
+            allowed = ", ".join(INTERVENTION_DIRECTION_CHOICES)
+            raise ValueError(
+                f"unsupported intervention direction {self.direction!r}; expected one of: {allowed}"
+            )
+        supported = INTERVENTION_SUPPORT.get(normalized_model)
+        if supported is None:
+            raise ValueError(f"unknown intervention model_id {self.model_id!r}")
+        if self.stage == "none":
+            return
+        if self.stress_type is None:
+            raise ValueError(
+                "--intervene-stage requires --stress to name the stressor used for "
+                "the counterfactual forward"
+            )
+        if self.stage in supported:
+            return
+        raise ValueError(unsupported_intervention_message(normalized_model, self.stage))
+
+    def config_record(self) -> dict[str, Any]:
+        record: dict[str, Any] = {
+            "model_id": self.model_id,
+            "stage": self.stage,
+            "direction": self.direction,
+            "stress_type": self.stress_type,
+            "stress_severity": self.stress_severity,
+            "base_source": self.base_source,
+            "applied_source": self.applied_source,
+        }
+        if self.model_id in SINGLE_INPUT_CONTROLLER_MODELS:
+            record["analytic_mediation_caveat"] = (
+                "controller consumes planning only; per-tick planning-control "
+                "decomposition is analytic, not empirical"
+            )
+        if self.model_id == "transfuser":
+            record["semantic_head_limit"] = (
+                "TransFuser's detection head is logged but is off the causal "
+                "path to control."
+            )
+        return record
+
+
+def unsupported_intervention_message(model_id: str, stage: str) -> str:
+    normalized_model = str(model_id).lower()
+    normalized_stage = str(stage)
+    if normalized_model == "transfuser" and normalized_stage == "semantic":
+        return TRANSFUSER_SEMANTIC_ERROR
+    if normalized_model in {"aim", "tcp"} and normalized_stage == "semantic":
+        return PLANNING_ONLY_SEMANTIC_ERROR.format(model_label=normalized_model.upper())
+    if normalized_model == "cilrs" and normalized_stage == "planning":
+        return CILRS_PLANNING_ERROR
+    if normalized_model == "cilrs" and normalized_stage == "semantic":
+        return PLANNING_ONLY_SEMANTIC_ERROR.format(model_label="CILRS")
+    supported = ", ".join(sorted(INTERVENTION_SUPPORT.get(normalized_model, set()))) or "none"
+    return (
+        f"{normalized_model} does not support {normalized_stage!r} intervention; "
+        f"supported intervention stages: {supported}"
+    )
 
 
 class SensorBuffer:
@@ -70,31 +235,78 @@ class SensorBuffer:
 
 
 class RouteProgressTracker:
-    def __init__(self, locations: list[Any]) -> None:
+    def __init__(
+        self,
+        locations: list[Any],
+        *,
+        search_window_points: int = 60,
+        max_lateral_m: float = 15.0,
+        off_route_frames: int = 20,
+    ) -> None:
         self.locations = locations
+        self.search_window_points = max(0, int(search_window_points))
+        self.max_lateral_m = float(max_lateral_m)
+        self.off_route_frames = max(1, int(off_route_frames))
         self.last_index = 0
         self.initial_remaining = max(self._polyline_distance(locations), 1.0)
+        self.last_lateral_error_m: float | None = None
+        self.corridor_gate_failed = False
+        self.off_route = False
+        self._consecutive_gate_failures = 0
+        self._max_progress = 0.0
+
+    @property
+    def consecutive_gate_failures(self) -> int:
+        return self._consecutive_gate_failures
 
     def reset_initial(self, current_location: Any) -> None:
         self.initial_remaining = max(self.remaining_distance(current_location), 1.0)
+        self._max_progress = 0.0
+        self._consecutive_gate_failures = 0
+        self.corridor_gate_failed = False
+        self.off_route = False
 
     def progress(self, current_location: Any) -> float:
         remaining = self.remaining_distance(current_location)
-        return clamp(1.0 - remaining / self.initial_remaining, 0.0, 1.0)
+        current_progress = clamp(1.0 - remaining / self.initial_remaining, 0.0, 1.0)
+        self._max_progress = max(self._max_progress, current_progress)
+        return self._max_progress
 
     def remaining_distance(self, current_location: Any) -> float:
         if not self.locations:
             return 0.0
-        nearest_index = self._nearest_route_index(current_location)
-        self.last_index = max(self.last_index, nearest_index)
+
+        nearest_index, lateral_error = self._nearest_route_candidate(current_location)
+        self.last_lateral_error_m = lateral_error
+        if lateral_error <= self.max_lateral_m:
+            self.last_index = nearest_index
+            self._consecutive_gate_failures = 0
+            self.corridor_gate_failed = False
+            self.off_route = False
+        else:
+            self._consecutive_gate_failures += 1
+            self.corridor_gate_failed = True
+            self.off_route = self._consecutive_gate_failures >= self.off_route_frames
+
         remaining = distance(current_location, self.locations[self.last_index])
         remaining += self._polyline_distance(self.locations[self.last_index :])
         return remaining
 
     def _nearest_route_index(self, current_location: Any) -> int:
-        start = max(0, self.last_index - 5)
-        candidates = range(start, len(self.locations))
-        return min(candidates, key=lambda idx: distance(current_location, self.locations[idx]))
+        nearest_index, _lateral_error = self._nearest_route_candidate(current_location)
+        return nearest_index
+
+    def _nearest_route_candidate(self, current_location: Any) -> tuple[int, float]:
+        if not self.locations:
+            return 0, math.inf
+        start = min(self.last_index, len(self.locations) - 1)
+        end = min(len(self.locations), start + self.search_window_points + 1)
+        candidates = range(start, end)
+        nearest_index = min(
+            candidates,
+            key=lambda idx: distance(current_location, self.locations[idx]),
+        )
+        return nearest_index, distance(current_location, self.locations[nearest_index])
 
     @staticmethod
     def _polyline_distance(locations: list[Any]) -> float:
@@ -108,6 +320,7 @@ def parse_record_args(
     *,
     description: str,
     default_checkpoint: Path,
+    model_id: str | None = None,
 ) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--host", default="localhost")
@@ -122,6 +335,25 @@ def parse_record_args(
     parser.add_argument("--stress-severity", type=int, default=3)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--spawn-index", type=int, default=0)
+    parser.add_argument(
+        "--dest-index",
+        type=int,
+        default=None,
+        help="optional destination spawn point index; omitted preserves the default opposite-spawn route",
+    )
+    parser.add_argument(
+        "--num-vehicles",
+        type=int,
+        default=0,
+        help="number of deterministic NPC vehicles to request (default 0)",
+    )
+    parser.add_argument(
+        "--num-walkers",
+        type=int,
+        default=0,
+        help="number of deterministic NPC walkers to request (default 0)",
+    )
+    add_intervention_args(parser)
     # Anti-crawl driving aid for models without a native creep controller
     # (AIM/CILRS/TCP fall into a cold-start crawl limit-cycle). When enabled, the
     # APPLIED throttle is nudged while the ego is crawling so it gets a rolling
@@ -165,12 +397,51 @@ def parse_record_args(
         parser.error("--warmup must be non-negative")
     if args.delta <= 0:
         parser.error("--delta must be positive")
+    if args.num_vehicles < 0:
+        parser.error("--num-vehicles must be non-negative")
+    if args.num_walkers < 0:
+        parser.error("--num-walkers must be non-negative")
     if args.stress != "none":
         try:
             validate_severity(args.stress_severity)
         except ValueError as exc:
             parser.error(str(exc))
+    if model_id is not None:
+        validate_intervention_args(parser, args, model_id)
     return args
+
+
+def add_intervention_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--intervene-stage",
+        choices=INTERVENTION_STAGE_CHOICES,
+        default="none",
+        help=(
+            "counterfactual stage to swap using the same-pose clean/stress "
+            "dual forward (default: none)"
+        ),
+    )
+    parser.add_argument(
+        "--intervene-direction",
+        choices=INTERVENTION_DIRECTION_CHOICES,
+        default="restore",
+        help=(
+            "restore uses a clean-forward stage inside a stress run; inject "
+            "uses a stressed-forward stage inside a clean run (ignored when "
+            "--intervene-stage none)"
+        ),
+    )
+
+
+def validate_intervention_args(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    model_id: str,
+) -> InterventionPolicy:
+    try:
+        return InterventionPolicy.from_args(args, model_id)
+    except ValueError as exc:
+        parser.error(str(exc))
 
 
 def configure_logging() -> None:
@@ -189,25 +460,35 @@ def run_recording(
     model_label: str,
     record_to_sd2: Callable[[dict[str, Any], str], dict[str, Any]],
     build_run_metadata: Callable[..., dict[str, Any]],
-    write_sd2_jsonl: Callable[[Path, dict[str, Any], list[dict[str, Any]]], None],
+    jsonl_writer_cls: Callable[[Path, dict[str, Any]], Any],
     logger: logging.Logger,
 ) -> int:
+    intervention_policy = InterventionPolicy.from_args(args, model_id)
     stressor, stress_rng = build_image_stressor(args, modules, logger)
+    random.seed(args.seed)
     rng = random.Random(args.seed)
 
-    client = modules.carla.Client(args.host, args.port)
-    client.set_timeout(20.0)
-
+    client = None
     world = None
     traffic_manager = None
     ego_vehicle = None
     sensors: list[Any] = []
+    npc_vehicles: list[Any] = []
+    npc_walkers: list[Any] = []
+    npc_walker_controllers: list[Any] = []
+    scene_counts = {
+        "vehicles": {"requested": int(getattr(args, "num_vehicles", 0) or 0), "spawned": 0},
+        "walkers": {"requested": int(getattr(args, "num_walkers", 0) or 0), "spawned": 0},
+    }
     frames: list[dict[str, Any]] = []
     collision_frames: set[int] = set()
     lane_invasion_frames: set[int] = set()
     event_lock = Lock()
 
     try:
+        client = modules.carla.Client(args.host, args.port)
+        client.set_timeout(20.0)
+
         world = client.load_world(args.town)
         traffic_manager = client.get_trafficmanager()
         traffic_manager.set_synchronous_mode(True)
@@ -225,7 +506,11 @@ def run_recording(
             raise RuntimeError(f"town {args.town!r} has no vehicle spawn points")
 
         spawn_index = select_spawn_index(args.spawn_index, len(spawn_points))
-        destination_index = select_destination_index(spawn_index, len(spawn_points))
+        destination_index = select_destination_index(
+            spawn_index,
+            len(spawn_points),
+            getattr(args, "dest_index", None),
+        )
         ego_vehicle = spawn_ego_vehicle(
             world,
             blueprint_library,
@@ -234,6 +519,22 @@ def run_recording(
             rng,
         )
         world.tick()
+
+        npc_vehicles, npc_walkers, npc_walker_controllers = spawn_npc_traffic(
+            modules.carla,
+            world,
+            blueprint_library,
+            traffic_manager,
+            spawn_points,
+            ego_spawn_index=spawn_index,
+            num_vehicles=scene_counts["vehicles"]["requested"],
+            num_walkers=scene_counts["walkers"]["requested"],
+            seed=args.seed,
+            rng=rng,
+            logger=logger,
+        )
+        scene_counts["vehicles"]["spawned"] = len(npc_vehicles)
+        scene_counts["walkers"]["spawned"] = len(npc_walkers)
 
         runtime = runtime_factory(args, modules, stressor, stress_rng)
         event_sensors = attach_event_sensors(
@@ -253,6 +554,7 @@ def run_recording(
             runtime.sensor_specs(),
             model_label,
             logger,
+            delta=args.delta,
         )
         sensors = [*event_sensors, *model_sensors]
 
@@ -268,14 +570,16 @@ def run_recording(
 
         gps_plan = build_sparse_gps_plan(world, route_transforms)
         route_locations = [transform.location for transform, _road_option in route_transforms]
+        route_length_meters = route_length(route_locations)
         progress_tracker = RouteProgressTracker(route_locations)
         runtime.set_global_plan(gps_plan)
 
         logger.info(
-            "Route ready: town=%s spawn=%d dest=%d dense_points=%d sparse_points=%d",
+            "Route ready: town=%s spawn=%d dest=%d route_length_m=%.1f dense_points=%d sparse_points=%d",
             args.town,
             spawn_index,
             destination_index,
+            route_length_meters,
             len(route_transforms),
             len(gps_plan),
         )
@@ -294,10 +598,10 @@ def run_recording(
         progress_tracker.reset_initial(ego_vehicle.get_location())
 
         scenario_id = f"{args.town}_spawn{spawn_index}_dest{destination_index}"
-        condition = "clean" if args.stress == "none" else "stress"
-        stress_type = None if args.stress == "none" else args.stress
-        severity = 0 if args.stress == "none" else args.stress_severity
+        condition, stress_type, severity = intervention_policy.metadata_condition
         run_id = build_run_id(model_id, scenario_id, condition, stress_type, severity, args.seed)
+        if intervention_policy.enabled:
+            run_id = f"{run_id}_iv-{intervention_policy.direction}-{intervention_policy.stage}"
         metadata = build_run_metadata(
             run_id=run_id,
             scenario_id=scenario_id,
@@ -316,57 +620,107 @@ def run_recording(
         crawl_counter = 0
         burst_remaining = 0
 
-        for frame_idx in range(args.frames):
-            frame_id = world.tick()
-            packet = sensor_buffer.read(frame_id)
-            current_speed = ego_speed(ego_vehicle)
-            packet["speed"] = (frame_id, {"speed": current_speed})
-            control, extracted = runtime.run_step(
-                packet,
-                timestamp=frame_idx * args.delta,
-                frame_id=frame_id,
-            )
+        with jsonl_writer_cls(args.output, metadata) as jsonl_writer:
+            for frame_idx in range(args.frames):
+                frame_id = world.tick()
+                packet = sensor_buffer.read(frame_id)
+                current_speed = ego_speed(ego_vehicle)
+                packet["speed"] = (frame_id, {"speed": current_speed})
+                control, extracted = runtime.run_step(
+                    packet,
+                    timestamp=frame_idx * args.delta,
+                    frame_id=frame_id,
+                )
 
-            # Anti-crawl nudge: the recorded control stage (built inside run_step)
-            # keeps the model's raw output; only the APPLIED throttle is nudged.
-            # Once engaged, the throttle burst is sustained for creep_duration
-            # frames to build momentum instead of fighting per-frame model braking.
-            crawl_counter = crawl_counter + 1 if current_speed < creep_speed else 0
-            if anti_crawl and burst_remaining == 0 and crawl_counter >= creep_frames:
-                burst_remaining = creep_duration
-                crawl_counter = 0
-            if anti_crawl and burst_remaining > 0:
-                control.throttle = creep_throttle
-                control.brake = 0.0
-                burst_remaining -= 1
-                if isinstance(extracted.get("control"), dict):
-                    extracted["control"]["anti_crawl_applied"] = True
-                    extracted["control"]["applied_throttle"] = creep_throttle
+                # Anti-crawl nudge: the recorded control stage (built inside run_step)
+                # keeps the model's raw output; only the APPLIED throttle is nudged.
+                # Once engaged, the throttle burst is sustained for creep_duration
+                # frames to build momentum instead of fighting per-frame model braking.
+                crawl_counter = crawl_counter + 1 if current_speed < creep_speed else 0
+                if anti_crawl and burst_remaining == 0 and crawl_counter >= creep_frames:
+                    burst_remaining = creep_duration
+                    crawl_counter = 0
+                if anti_crawl and burst_remaining > 0:
+                    control.throttle = creep_throttle
+                    control.brake = 0.0
+                    burst_remaining -= 1
+                    if isinstance(extracted.get("control"), dict):
+                        extracted["control"]["anti_crawl_applied"] = True
+                        extracted["control"]["applied_throttle"] = creep_throttle
 
-            ego_vehicle.apply_control(control)
+                ego_vehicle.apply_control(control)
 
-            extracted["frame_idx"] = frame_idx
-            extracted["timestamp"] = round(frame_idx * args.delta, 6)
-            extracted["ego"] = ego_measurement(ego_vehicle)
-            extracted["outcome"] = {
-                "collision": event_seen(collision_frames, frame_id, event_lock),
-                "lane_invasion": event_seen(lane_invasion_frames, frame_id, event_lock),
-                "route_progress": progress_tracker.progress(ego_vehicle.get_location()),
-                "min_ttc": None,
-            }
-            frames.append(record_to_sd2(extracted, run_id=run_id))
+                current_location = ego_vehicle.get_location()
+                route_progress = progress_tracker.progress(current_location)
+                extracted["frame_idx"] = frame_idx
+                extracted["timestamp"] = round(frame_idx * args.delta, 6)
+                extracted["ego"] = ego_measurement(ego_vehicle)
+                extracted["outcome"] = {
+                    "collision": event_seen(collision_frames, frame_id, event_lock),
+                    "lane_invasion": event_seen(lane_invasion_frames, frame_id, event_lock),
+                    "route_progress": route_progress,
+                    "off_route": progress_tracker.off_route,
+                    "min_ttc": None,
+                }
+                frame = record_to_sd2(extracted, run_id=run_id)
+                jsonl_writer.write_frame(frame)
+                frames.append(frame)
 
-        write_sd2_jsonl(args.output, metadata, frames)
+        write_intervention_sidecar(args.output, intervention_policy)
+        write_scene_sidecar(
+            args.output,
+            town=args.town,
+            spawn_index=spawn_index,
+            dest_index=destination_index,
+            seed=args.seed,
+            vehicles=scene_counts["vehicles"],
+            walkers=scene_counts["walkers"],
+            frames=args.frames,
+            delta=args.delta,
+            route_length_meters=route_length_meters,
+        )
         print_summary(args.output, frames)
         return 0
     finally:
-        cleanup(
-            modules.carla if "modules" in locals() else None,
-            world,
-            traffic_manager,
-            sensors,
-            ego_vehicle,
-        )
+        try:
+            cleanup(
+                modules.carla if "modules" in locals() else None,
+                world,
+                traffic_manager,
+                sensors,
+                ego_vehicle,
+                npc_vehicles,
+                npc_walkers,
+                npc_walker_controllers,
+            )
+        finally:
+            # Drop CARLA wrappers before frame teardown picks an arbitrary order.
+            extracted = None
+            _extracted = None
+            control = None
+            packet = None
+            runtime = None
+            progress_tracker = None
+            route_locations = None
+            gps_plan = None
+            route_transforms = None
+            route = None
+            basic_agent = None
+            destination = None
+            sensor_buffer = None
+            model_sensors = None
+            event_sensors = None
+            sensors = []
+            npc_walker_controllers = []
+            npc_walkers = []
+            npc_vehicles = []
+            ego_vehicle = None
+            spawn_points = None
+            blueprint_library = None
+            settings = None
+            traffic_manager = None
+            world = None
+            client = None
 
 
 def build_image_stressor(
@@ -385,6 +739,52 @@ def build_image_stressor(
     return stressor, rng
 
 
+def write_intervention_sidecar(path: str | Path, policy: InterventionPolicy) -> None:
+    output_path = Path(f"{path}.intervention.json")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(policy.config_record(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def write_scene_sidecar(
+    path: str | Path,
+    *,
+    town: str,
+    spawn_index: int,
+    dest_index: int,
+    seed: int,
+    vehicles: Mapping[str, Any],
+    walkers: Mapping[str, Any],
+    frames: int,
+    delta: float,
+    route_length_meters: float | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "town": str(town),
+        "spawn_index": int(spawn_index),
+        "dest_index": int(dest_index),
+        "seed": int(seed),
+        "vehicles": {
+            "requested": int(vehicles.get("requested", 0)),
+            "spawned": int(vehicles.get("spawned", 0)),
+        },
+        "walkers": {
+            "requested": int(walkers.get("requested", 0)),
+            "spawned": int(walkers.get("spawned", 0)),
+        },
+        "frames": int(frames),
+        "delta": float(delta),
+    }
+    if route_length_meters is not None:
+        payload["route_length_meters"] = float(route_length_meters)
+
+    output_path = Path(f"{path}.scene.json")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
 def apply_visual_stress(
     image: Any,
     stressor: ImageStressor | None,
@@ -394,6 +794,75 @@ def apply_visual_stress(
     if stressor is None:
         return image
     return stressor.apply_image(image, severity, rng)
+
+
+def control_to_dict(control: Any) -> dict[str, float]:
+    return {
+        "steer": float(getattr(control, "steer", 0.0)),
+        "throttle": float(getattr(control, "throttle", 0.0)),
+        "brake": float(getattr(control, "brake", 0.0)),
+    }
+
+
+def vehicle_control_from_dict(carla: Any, command: Mapping[str, Any]) -> Any:
+    control = carla.VehicleControl()
+    control.steer = float(command.get("steer", 0.0))
+    control.throttle = float(command.get("throttle", 0.0))
+    control.brake = float(command.get("brake", 0.0))
+    return control
+
+
+def build_intervention_block(
+    policy: InterventionPolicy,
+    *,
+    control_from_stress_forward: Mapping[str, Any],
+    control_from_clean_forward: Mapping[str, Any],
+    planning_waypoints_clean_forward: Any = None,
+    semantic_clean_forward: Mapping[str, Any] | None = None,
+    control_hybrid_planning_clean: Mapping[str, Any] | None = None,
+    control_hybrid_semantic_clean: Mapping[str, Any] | None = None,
+    applied_source: str | None = None,
+) -> dict[str, Any]:
+    block: dict[str, Any] = {
+        "stage": policy.stage,
+        "direction": policy.direction,
+        "applied_source": applied_source or policy.applied_source,
+        "control_from_stress_forward": jsonable(dict(control_from_stress_forward)),
+        "control_from_clean_forward": jsonable(dict(control_from_clean_forward)),
+        "planning_waypoints_clean_forward": jsonable(planning_waypoints_clean_forward),
+        "config": policy.config_record(),
+    }
+    if semantic_clean_forward is not None:
+        block["semantic_clean_forward"] = jsonable(dict(semantic_clean_forward))
+    if control_hybrid_planning_clean is not None:
+        block["control_hybrid_planning_clean"] = jsonable(
+            dict(control_hybrid_planning_clean)
+        )
+    if control_hybrid_semantic_clean is not None:
+        block["control_hybrid_semantic_clean"] = jsonable(
+            dict(control_hybrid_semantic_clean)
+        )
+    return block
+
+
+def snapshot_pid_controllers(owner: Any) -> dict[str, Any]:
+    """Copy only PID controllers, not arbitrary controller or model state.
+
+    This helper is intentionally limited to the classic ``turn_controller`` and
+    ``speed_controller`` attributes. It does not isolate other mutable fields on
+    ``owner``.
+    """
+
+    state: dict[str, Any] = {}
+    for attr in ("turn_controller", "speed_controller"):
+        if hasattr(owner, attr):
+            state[attr] = deepcopy(getattr(owner, attr))
+    return state
+
+
+def restore_pid_controllers(owner: Any, state: Mapping[str, Any]) -> None:
+    for attr, value in state.items():
+        setattr(owner, attr, deepcopy(value))
 
 
 def attach_event_sensors(
@@ -428,6 +897,27 @@ def attach_event_sensors(
     return sensors
 
 
+def validate_sensor_ticks(sensor_specs: tuple[dict[str, Any], ...], delta: float) -> None:
+    """Every sensor must be able to produce a reading on every simulation tick.
+
+    CARLA fires a sensor once its accumulated elapsed time reaches ``sensor_tick``. A
+    ``sensor_tick`` at or above the world delta therefore skips a tick eventually, to
+    floating-point accumulation. In synchronous mode the recorder then blocks in
+    ``SensorBuffer.read`` waiting for a reading that can never arrive, because no
+    further tick is issued while it waits. Fail loudly at startup instead.
+    """
+
+    for spec in sensor_specs:
+        tick = spec.get("sensor_tick")
+        if tick is None:
+            continue
+        if float(tick) >= float(delta):
+            raise ValueError(
+                f"sensor {spec.get('id')!r} has sensor_tick={tick} >= world delta={delta}; "
+                f"it will eventually skip a tick and hang the recorder. Use sensor_tick=0.0."
+            )
+
+
 def attach_model_sensors(
     modules: Any,
     world: Any,
@@ -436,7 +926,10 @@ def attach_model_sensors(
     sensor_specs: tuple[dict[str, Any], ...],
     model_label: str,
     logger: logging.Logger,
+    delta: float | None = None,
 ) -> tuple[SensorBuffer, list[Any]]:
+    if delta is not None:
+        validate_sensor_ticks(sensor_specs, delta)
     active_specs = [spec for spec in sensor_specs if spec["type"] != "sensor.speedometer"]
     buffer = SensorBuffer([str(spec["id"]) for spec in active_specs])
     sensors: list[Any] = []
@@ -575,7 +1068,11 @@ def location_to_gps(lat_ref: float, lon_ref: float, location: Any) -> dict[str, 
     mx = scale * lon_ref * math.pi * earth_radius_equator / 180.0
     my = scale * earth_radius_equator * math.log(math.tan((90.0 + lat_ref) * math.pi / 360.0))
     mx += location.x
-    my -= location.y
+    # CARLA 0.9.16's GNSS sensor reports latitude increasing with +y. The CARLA 0.9.10
+    # leaderboard code this was ported from negated y here; keeping that negation
+    # mirrors the whole global plan about y=0, so next_wp -- and therefore
+    # target_point -- points at a reflected goal and the ego drives off route.
+    my += location.y
     lon = mx * 180.0 / (math.pi * earth_radius_equator * scale)
     lat = 360.0 * math.atan(math.exp(my / (earth_radius_equator * scale))) / math.pi - 90.0
     return {"lat": lat, "lon": lon, "z": location.z}
@@ -602,7 +1099,13 @@ def select_spawn_index(requested: int, count: int) -> int:
     return int(requested) % count
 
 
-def select_destination_index(spawn_index: int, count: int) -> int:
+def select_destination_index(
+    spawn_index: int,
+    count: int,
+    requested: int | None = None,
+) -> int:
+    if requested is not None:
+        return int(requested) % count
     return (spawn_index + max(1, count // 2)) % count
 
 
@@ -634,6 +1137,186 @@ def spawn_ego_vehicle(
             vehicle.set_autopilot(False)
             return vehicle
     raise RuntimeError("failed to spawn ego vehicle at any map spawn point")
+
+
+def spawn_npc_traffic(
+    carla: Any,
+    world: Any,
+    blueprint_library: Any,
+    traffic_manager: Any,
+    spawn_points: list[Any],
+    *,
+    ego_spawn_index: int,
+    num_vehicles: int,
+    num_walkers: int,
+    seed: int,
+    rng: random.Random,
+    logger: logging.Logger,
+) -> tuple[list[Any], list[Any], list[Any]]:
+    vehicles: list[Any] = []
+    walkers: list[Any] = []
+    walker_controllers: list[Any] = []
+
+    if num_vehicles > 0:
+        vehicles = spawn_npc_vehicles(
+            world,
+            blueprint_library,
+            traffic_manager,
+            spawn_points,
+            ego_spawn_index=ego_spawn_index,
+            requested=num_vehicles,
+            rng=rng,
+        )
+
+    if num_walkers > 0:
+        walkers, walker_controllers = spawn_npc_walkers(
+            carla,
+            world,
+            blueprint_library,
+            requested=num_walkers,
+            seed=seed,
+            rng=rng,
+        )
+
+    logger.info(
+        "NPC traffic ready: vehicles requested=%d spawned=%d walkers requested=%d spawned=%d",
+        num_vehicles,
+        len(vehicles),
+        num_walkers,
+        len(walkers),
+    )
+    return vehicles, walkers, walker_controllers
+
+
+def spawn_npc_vehicles(
+    world: Any,
+    blueprint_library: Any,
+    traffic_manager: Any,
+    spawn_points: list[Any],
+    *,
+    ego_spawn_index: int,
+    requested: int,
+    rng: random.Random,
+) -> list[Any]:
+    blueprints = sorted(
+        list(blueprint_library.filter("vehicle.*")),
+        key=lambda item: item.id,
+    )
+    if not blueprints:
+        return []
+
+    candidates = [
+        point for index, point in enumerate(spawn_points) if index != int(ego_spawn_index)
+    ]
+    rng.shuffle(candidates)
+    tm_port = int(traffic_manager.get_port())
+    vehicles: list[Any] = []
+    for transform in candidates:
+        if len(vehicles) >= requested:
+            break
+        blueprint = rng.choice(blueprints)
+        prepare_npc_vehicle_blueprint(blueprint, rng)
+        vehicle = world.try_spawn_actor(blueprint, transform)
+        if vehicle is None:
+            continue
+        try:
+            vehicle.set_autopilot(True, tm_port)
+        except RuntimeError:
+            try:
+                if vehicle.is_alive:
+                    vehicle.destroy()
+            except RuntimeError:
+                pass
+            continue
+        vehicles.append(vehicle)
+    return vehicles
+
+
+def prepare_npc_vehicle_blueprint(blueprint: Any, rng: random.Random) -> None:
+    if blueprint.has_attribute("role_name"):
+        blueprint.set_attribute("role_name", "autopilot")
+    if blueprint.has_attribute("color"):
+        colors = blueprint.get_attribute("color").recommended_values
+        if colors:
+            blueprint.set_attribute("color", colors[rng.randrange(len(colors))])
+    if blueprint.has_attribute("driver_id"):
+        drivers = blueprint.get_attribute("driver_id").recommended_values
+        if drivers:
+            blueprint.set_attribute("driver_id", drivers[rng.randrange(len(drivers))])
+
+
+def spawn_npc_walkers(
+    carla: Any,
+    world: Any,
+    blueprint_library: Any,
+    *,
+    requested: int,
+    seed: int,
+    rng: random.Random,
+) -> tuple[list[Any], list[Any]]:
+    if hasattr(world, "set_pedestrians_seed"):
+        world.set_pedestrians_seed(int(seed))
+
+    walker_blueprints = sorted(
+        list(blueprint_library.filter("walker.pedestrian.*")),
+        key=lambda item: item.id,
+    )
+    if not walker_blueprints:
+        return [], []
+
+    controller_blueprint = blueprint_library.find("controller.ai.walker")
+    walkers: list[Any] = []
+    controllers: list[Any] = []
+    speeds_by_walker: list[float] = []
+
+    attempts = max(requested * 4, requested)
+    for _ in range(attempts):
+        if len(walkers) >= requested:
+            break
+        location = world.get_random_location_from_navigation()
+        if location is None:
+            continue
+        walker_blueprint = rng.choice(walker_blueprints)
+        walker_speed = walker_speed_from_blueprint(walker_blueprint)
+        walker = world.try_spawn_actor(walker_blueprint, carla.Transform(location))
+        if walker is None:
+            continue
+        controller = world.try_spawn_actor(controller_blueprint, carla.Transform(), walker)
+        if controller is None:
+            try:
+                if walker.is_alive:
+                    walker.destroy()
+            except RuntimeError:
+                pass
+            continue
+        walkers.append(walker)
+        controllers.append(controller)
+        speeds_by_walker.append(walker_speed)
+
+    if controllers:
+        world.tick()
+    for controller, speed in zip(controllers, speeds_by_walker):
+        try:
+            controller.start()
+            target = world.get_random_location_from_navigation()
+            if target is not None:
+                controller.go_to_location(target)
+            controller.set_max_speed(speed)
+        except RuntimeError:
+            pass
+
+    return walkers, controllers
+
+
+def walker_speed_from_blueprint(blueprint: Any) -> float:
+    if not blueprint.has_attribute("speed"):
+        return 1.4
+    values = blueprint.get_attribute("speed").recommended_values
+    if len(values) > 1:
+        return float(values[1])
+    if values:
+        return float(values[0])
+    return 1.4
 
 
 def route_position(np: Any, route_planner: Any, gps: Any) -> Any:
@@ -715,36 +1398,111 @@ def cleanup(
     traffic_manager: Any | None,
     sensors: list[Any],
     ego_vehicle: Any | None,
+    npc_vehicles: list[Any] | None = None,
+    npc_walkers: list[Any] | None = None,
+    npc_walker_controllers: list[Any] | None = None,
 ) -> None:
     del carla
-    for sensor in sensors:
+    try:
         try:
-            if sensor is not None and sensor.is_alive:
-                sensor.stop()
-                sensor.destroy()
+            for sensor in sensors:
+                try:
+                    if sensor is not None and sensor.is_alive:
+                        sensor.stop()
+                        sensor.destroy()
+                except RuntimeError:
+                    pass
+
+            for controller in npc_walker_controllers or []:
+                try:
+                    if controller is not None and controller.is_alive:
+                        controller.stop()
+                        controller.destroy()
+                except RuntimeError:
+                    pass
+
+            for walker in npc_walkers or []:
+                try:
+                    if walker is not None and walker.is_alive:
+                        walker.destroy()
+                except RuntimeError:
+                    pass
+
+            _unregister_npc_vehicles_from_traffic_manager(
+                world,
+                traffic_manager,
+                npc_vehicles,
+            )
+
+            for vehicle in npc_vehicles or []:
+                try:
+                    if vehicle is not None and vehicle.is_alive:
+                        vehicle.destroy()
+                except RuntimeError:
+                    pass
+
+            try:
+                if ego_vehicle is not None and ego_vehicle.is_alive:
+                    ego_vehicle.destroy()
+            except RuntimeError:
+                pass
+        finally:
+            if traffic_manager is not None:
+                try:
+                    traffic_manager.set_synchronous_mode(False)
+                except RuntimeError:
+                    pass
+    finally:
+        _restore_world_async(world)
+
+
+def _unregister_npc_vehicles_from_traffic_manager(
+    world: Any | None,
+    traffic_manager: Any | None,
+    npc_vehicles: list[Any] | None,
+) -> None:
+    if traffic_manager is None:
+        return
+
+    tm_port: int | None = None
+    attempted_unregister = False
+    for vehicle in npc_vehicles or []:
+        try:
+            if vehicle is not None and vehicle.is_alive:
+                if tm_port is None:
+                    tm_port = int(traffic_manager.get_port())
+                attempted_unregister = True
+                vehicle.set_autopilot(False, tm_port)
         except RuntimeError:
-            pass
+            attempted_unregister = True
+
+    if attempted_unregister:
+        _tick_world_if_synchronous(world)
+
+
+def _tick_world_if_synchronous(world: Any | None) -> None:
+    if world is None:
+        return
 
     try:
-        if ego_vehicle is not None and ego_vehicle.is_alive:
-            ego_vehicle.destroy()
+        settings = world.get_settings()
+        if bool(getattr(settings, "synchronous_mode", False)):
+            world.tick()
     except RuntimeError:
         pass
 
-    if traffic_manager is not None:
-        try:
-            traffic_manager.set_synchronous_mode(False)
-        except RuntimeError:
-            pass
 
-    if world is not None:
-        try:
-            settings = world.get_settings()
-            settings.synchronous_mode = False
-            settings.fixed_delta_seconds = None
-            world.apply_settings(settings)
-        except RuntimeError:
-            pass
+def _restore_world_async(world: Any | None) -> None:
+    if world is None:
+        return
+
+    try:
+        settings = world.get_settings()
+        settings.synchronous_mode = False
+        settings.fixed_delta_seconds = None
+        world.apply_settings(settings)
+    except RuntimeError:
+        pass
 
 
 def distance(left: Any, right: Any) -> float:
@@ -753,6 +1511,10 @@ def distance(left: Any, right: Any) -> float:
     return math.sqrt(
         (left.x - right.x) ** 2 + (left.y - right.y) ** 2 + (left.z - right.z) ** 2
     )
+
+
+def route_length(locations: list[Any]) -> float:
+    return RouteProgressTracker._polyline_distance(locations)
 
 
 def pool_feature(np: Any, feature: Any) -> list[float]:

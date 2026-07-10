@@ -26,11 +26,18 @@ from threading import Lock
 from typing import Any, Callable, Mapping
 
 from sd2.adapters.transfuser_adapter import (
+    Sd2JsonlWriter,
     build_transfuser_run_metadata,
     transfuser_record_to_sd2,
-    write_sd2_jsonl,
 )
 from sd2.stressors import ImageStressor, build_stressor, validate_severity
+
+try:
+    import _carla_e2e_common as e2e
+except ImportError:
+    from experiments import _carla_e2e_common as e2e
+
+RouteProgressTracker = e2e.RouteProgressTracker
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -105,40 +112,6 @@ class SensorBuffer:
                 packet[sensor_id] = (sensor_frame, payload)
                 break
         return packet
-
-
-class RouteProgressTracker:
-    def __init__(self, locations: list[Any]) -> None:
-        self.locations = locations
-        self.last_index = 0
-        self.initial_remaining = max(self._polyline_distance(locations), 1.0)
-
-    def reset_initial(self, current_location: Any) -> None:
-        self.initial_remaining = max(self.remaining_distance(current_location), 1.0)
-
-    def progress(self, current_location: Any) -> float:
-        remaining = self.remaining_distance(current_location)
-        return _clamp(1.0 - remaining / self.initial_remaining, 0.0, 1.0)
-
-    def remaining_distance(self, current_location: Any) -> float:
-        if not self.locations:
-            return 0.0
-        nearest_index = self._nearest_route_index(current_location)
-        self.last_index = max(self.last_index, nearest_index)
-        remaining = _distance(current_location, self.locations[self.last_index])
-        remaining += self._polyline_distance(self.locations[self.last_index :])
-        return remaining
-
-    def _nearest_route_index(self, current_location: Any) -> int:
-        start = max(0, self.last_index - 5)
-        candidates = range(start, len(self.locations))
-        return min(candidates, key=lambda idx: _distance(current_location, self.locations[idx]))
-
-    @staticmethod
-    def _polyline_distance(locations: list[Any]) -> float:
-        if len(locations) < 2:
-            return 0.0
-        return sum(_distance(left, right) for left, right in zip(locations, locations[1:]))
 
 
 class TransFuserRoutePlanner:
@@ -293,6 +266,7 @@ class TransFuserRuntime:
         self.ego_model = EgoModel(self.np, dt=self.config.carla_frame_rate)
         self.aug_degrees = [0]
         self.steer_damping = self.config.steer_damping
+        self.intervention = e2e.InterventionPolicy.from_args(args, "transfuser")
         # Driving-diagnosis toggles (see README "TransFuser driving debugging").
         # The reviewer runs these live to isolate why TransFuser holds station.
         self.use_lidar_safe_check = not bool(getattr(args, "no_lidar_safe_check", False))
@@ -370,7 +344,10 @@ class TransFuserRuntime:
                 "roll": 0.0,
                 "pitch": 0.0,
                 "yaw": 0.0,
-                "sensor_tick": self.config.carla_frame_rate,
+                # Must fire on every tick. A sensor_tick equal to the world delta eventually
+                # skips a tick to floating-point accumulation, and the recorder then blocks
+                # forever waiting for that frame's reading.
+                "sensor_tick": 0.0,
                 "id": "imu",
             },
             {
@@ -381,7 +358,9 @@ class TransFuserRuntime:
                 "roll": 0.0,
                 "pitch": 0.0,
                 "yaw": 0.0,
-                "sensor_tick": 0.01,
+                # Same trap as the imu: a sensor_tick at or above the world delta
+                # eventually skips a tick and the recorder blocks forever.
+                "sensor_tick": 0.0,
                 "id": "gps",
             },
             {
@@ -417,26 +396,11 @@ class TransFuserRuntime:
         frame_id: int,
     ) -> tuple[Any, dict[str, Any]]:
         self.step += 1
-        tick_data = self._tick(sensor_packet)
-
-        if self.step % self.config.action_repeat == 1:
-            if self.prev_extracted is None:
-                raise RuntimeError("TransFuser action-repeat path has no previous output")
-            self.update_gps_buffer(
-                self.prev_control,
-                tick_data["compass"],
-                tick_data["speed"],
-            )
-            extracted = dict(self.prev_extracted)
-            extracted["transfuser"] = {
-                **dict(extracted.get("transfuser", {})),
-                "carla_frame": int(frame_id),
-                "action_repeated": True,
-            }
-            return self.prev_control, extracted
-
-        model_input = self._build_model_input(sensor_packet, tick_data)
-        input_shapes = _shape_summary(model_input)
+        tick_clean = self._tick(sensor_packet)
+        tick_stress = self._with_stressed_images(tick_clean)
+        stress_input = self._build_model_input(sensor_packet, tick_stress)
+        clean_input = self._build_model_input(sensor_packet, tick_clean)
+        input_shapes = _shape_summary(stress_input)
         if not self.logged_shapes:
             LOGGER.info("First TransFuser sensor packet shapes: %s", _sensor_shape_summary(sensor_packet))
             LOGGER.info("First TransFuser model input shapes: %s", input_shapes)
@@ -445,56 +409,57 @@ class TransFuserRuntime:
             self.stuck_detector > self.config.stuck_threshold
             and self.forced_move < self.config.creep_duration
         )
+        forced_move_after = self.forced_move + 1 if is_stuck else self.forced_move
+        first_forced_move = is_stuck and forced_move_after == 1
         if is_stuck:
             LOGGER.info("Detected TransFuser stuck state; forced_move=%s", self.forced_move)
-            self.forced_move += 1
+        safety_box = self._safety_box(tick_stress)
 
-        try:
-            with self.torch.no_grad():
-                pred_wp, rotated_bb, fused_feature, features = self._forward_ego_with_feature(
-                    model_input["image"],
-                    model_input["lidar_bev"],
-                    model_input["target_point"],
-                    model_input["target_point_image"],
-                    model_input["velocity"],
-                    num_points=model_input.get("num_points"),
-                )
-        except Exception:
-            LOGGER.exception("TransFuser forward failed; model input shapes were: %s", input_shapes)
-            raise
+        stress_forward = self._forward_once(
+            stress_input,
+            input_shapes,
+            is_stuck=is_stuck,
+            first_forced_move=first_forced_move,
+            safety_box=safety_box,
+        )
+        clean_forward = self._forward_once(
+            clean_input,
+            input_shapes,
+            is_stuck=is_stuck,
+            first_forced_move=first_forced_move,
+            safety_box=safety_box,
+        )
 
-        pred_wp = self._postprocess_waypoints([pred_wp])
-        gt_velocity = model_input["gt_velocity"]
-        safety_box = self._safety_box(tick_data)
+        control_hybrid_planning_clean = (
+            clean_forward["control"] if self.intervention.stage == "none" else None
+        )
+        applied_forward = clean_forward if self.intervention.applied_source == "clean_forward" else stress_forward
+        applied_control = self._control_from_waypoints(
+            applied_forward["pred_wp"],
+            applied_forward["gt_velocity"],
+            is_stuck=is_stuck,
+            first_forced_move=first_forced_move,
+            safety_box=safety_box,
+            preserve_state=False,
+        )
+        applied_forward = {**applied_forward, "control": applied_control}
+        self.forced_move = forced_move_after
 
-        steer, throttle, brake = self.net.control_pid(pred_wp, gt_velocity, is_stuck)
-        if is_stuck and self.forced_move == 1:
-            steer = 0.0
-        if _as_bool(brake) or is_stuck:
-            steer = float(steer) * self.steer_damping
-
-        speed_value = _scalar_float(gt_velocity)
+        speed_value = _scalar_float(stress_input["gt_velocity"])
         if speed_value < self.crawl_speed:
             self.stuck_detector += 1
         elif speed_value > self.crawl_speed and not is_stuck:
             self.stuck_detector = 0
             self.forced_move = 0
 
-        emergency_stop = False
-        if self.use_lidar_safe_check and safety_box is not None:
-            emergency_stop = len(safety_box) >= SAFETY_BOX_MIN_POINTS
-            if emergency_stop:
-                throttle = 0.0
-                brake = True
-
         control = self.modules.carla.VehicleControl()
-        control.steer = _scalar_float(steer)
-        control.throttle = _scalar_float(throttle)
-        control.brake = _scalar_float(brake)
+        control.steer = float(applied_control["steer"])
+        control.throttle = float(applied_control["throttle"])
+        control.brake = float(applied_control["brake"])
 
         if self.debug_driving:
-            target_point_np = model_input["target_point"].detach().cpu().numpy().reshape(-1)
-            debug_wp = pred_wp.detach().cpu().numpy()[0]
+            target_point_np = stress_input["target_point"].detach().cpu().numpy().reshape(-1)
+            debug_wp = stress_forward["pred_wp"].detach().cpu().numpy()[0]
             LOGGER.info(
                 "DRIVE step=%d speed=%.3f is_stuck=%s stuck_detector=%d forced_move=%d "
                 "emergency_stop=%s safety_pts=%d target_point=%s wp0=%s wp_last=%s "
@@ -504,7 +469,7 @@ class TransFuserRuntime:
                 is_stuck,
                 self.stuck_detector,
                 self.forced_move,
-                emergency_stop,
+                applied_control["emergency_stop"],
                 0 if safety_box is None else len(safety_box),
                 target_point_np.round(2).tolist(),
                 debug_wp[0].round(2).tolist() if len(debug_wp) else None,
@@ -514,19 +479,19 @@ class TransFuserRuntime:
                 control.brake,
             )
 
-        self.update_gps_buffer(control, tick_data["compass"], tick_data["speed"])
+        self.update_gps_buffer(control, tick_stress["compass"], tick_stress["speed"])
 
-        pred_wp_np = pred_wp.detach().cpu().numpy()[0]
-        fused_feature_np = fused_feature.detach().cpu().numpy()
-        bev_seg_summary = self._try_bev_seg_summary(features)
-        rotated_records = _rotated_bb_to_records(rotated_bb)
+        pred_wp_np = stress_forward["pred_wp"].detach().cpu().numpy()[0]
+        fused_feature_np = stress_forward["fused_feature"].detach().cpu().numpy()
+        bev_seg_summary = self._try_bev_seg_summary(stress_forward["features"])
+        rotated_records = _rotated_bb_to_records(stress_forward["rotated_bb"])
 
         if not self.logged_shapes:
             output_shapes = {
-                "pred_wp": _shape_summary(pred_wp),
-                "rotated_bb": _shape_summary(rotated_bb),
+                "pred_wp": _shape_summary(stress_forward["pred_wp"]),
+                "rotated_bb": _shape_summary(stress_forward["rotated_bb"]),
                 "rotated_bb_count": len(rotated_records),
-                "fused_feature": _shape_summary(fused_feature),
+                "fused_feature": _shape_summary(stress_forward["fused_feature"]),
                 "feature_source": "fused_features_before_waypoint_gru",
             }
             LOGGER.info("First TransFuser model output shapes: %s", output_shapes)
@@ -534,8 +499,8 @@ class TransFuserRuntime:
 
         extracted = {
             "vision": {
-                "image_mean": tick_data["image_mean"],
-                "image_std": tick_data["image_std"],
+                "image_mean": tick_stress["image_mean"],
+                "image_std": tick_stress["image_std"],
                 "feature": _pool_feature(self.np, fused_feature_np),
                 "feature_source": "mean_pooled_fused_features",
             },
@@ -546,8 +511,8 @@ class TransFuserRuntime:
             "planning": {
                 "waypoints": pred_wp_np.astype(float).tolist(),
                 "target_speed": _target_speed_from_waypoints(self.np, pred_wp_np),
-                "target_point": [float(value) for value in tick_data["target_point"]],
-                "command": int(tick_data["next_command"]),
+                "target_point": [float(value) for value in tick_stress["target_point"]],
+                "command": int(tick_stress["next_command"]),
                 "is_stuck": bool(is_stuck),
             },
             "control": {
@@ -564,8 +529,15 @@ class TransFuserRuntime:
                 "use_target_point_image": bool(self.config.use_target_point_image),
                 "use_point_pillars": bool(self.config.use_point_pillars),
                 "safety_box_points": 0 if safety_box is None else int(len(safety_box)),
-                "emergency_stop": bool(emergency_stop),
+                "emergency_stop": bool(applied_control["emergency_stop"]),
             },
+            "intervention": e2e.build_intervention_block(
+                self.intervention,
+                control_from_stress_forward=stress_forward["control"],
+                control_from_clean_forward=clean_forward["control"],
+                planning_waypoints_clean_forward=clean_forward["pred_wp"].detach().cpu().numpy()[0].astype(float).tolist(),
+                control_hybrid_planning_clean=control_hybrid_planning_clean,
+            ),
         }
 
         self.prev_control = control
@@ -574,14 +546,12 @@ class TransFuserRuntime:
 
     def _tick(self, input_data: dict[str, tuple[int, Any]]) -> dict[str, Any]:
         rgb_parts = []
-        stressed_front = None
+        raw_rgb_by_pos = {}
         for pos in ("left", "front", "right"):
             sensor_id = f"rgb_{pos}"
             rgb_pos = self.cv2.cvtColor(input_data[sensor_id][1][:, :, :3], self.cv2.COLOR_BGR2RGB)
-            rgb_pos = self._apply_visual_stress(rgb_pos)
-            if pos == "front":
-                stressed_front = rgb_pos
-            rgb_pos = self.scale_crop(
+            raw_rgb_by_pos[pos] = rgb_pos
+            rgb_cropped = self.scale_crop(
                 self.Image.fromarray(rgb_pos),
                 self.config.scale,
                 self.config.img_width,
@@ -589,7 +559,7 @@ class TransFuserRuntime:
                 self.config.img_resolution[0],
                 self.config.img_resolution[0],
             )
-            rgb_parts.append(rgb_pos)
+            rgb_parts.append(rgb_cropped)
         rgb = self.np.concatenate(rgb_parts, axis=1)
 
         gps = input_data["gps"][1][:2]
@@ -605,10 +575,10 @@ class TransFuserRuntime:
             "compass": compass,
             "image_mean": float(rgb.astype(self.np.float32).mean() / 255.0),
             "image_std": float(rgb.astype(self.np.float32).std() / 255.0),
+            "_raw_rgb_by_pos": raw_rgb_by_pos,
         }
-        if stressed_front is not None:
-            result["front_image_mean"] = float(stressed_front.astype(self.np.float32).mean() / 255.0)
-            result["front_image_std"] = float(stressed_front.astype(self.np.float32).std() / 255.0)
+        result["front_image_mean"] = float(raw_rgb_by_pos["front"].astype(self.np.float32).mean() / 255.0)
+        result["front_image_std"] = float(raw_rgb_by_pos["front"].astype(self.np.float32).std() / 255.0)
 
         if self.backbone != "latentTF":
             result["lidar"] = input_data["lidar"][1][:, :3]
@@ -633,6 +603,33 @@ class TransFuserRuntime:
         local_command_point = rotation.T.dot(local_command_point)
         result["target_point"] = tuple(local_command_point)
         return result
+
+    def _with_stressed_images(self, tick_data: dict[str, Any]) -> dict[str, Any]:
+        stressed = dict(tick_data)
+        rgb_parts = []
+        raw_rgb_by_pos = tick_data.get("_raw_rgb_by_pos", {})
+        stressed_raw_by_pos = {}
+        for pos in ("left", "front", "right"):
+            raw_rgb = raw_rgb_by_pos[pos]
+            stressed_raw = self._apply_visual_stress(raw_rgb)
+            stressed_raw_by_pos[pos] = stressed_raw
+            rgb_cropped = self.scale_crop(
+                self.Image.fromarray(stressed_raw),
+                self.config.scale,
+                self.config.img_width,
+                self.config.img_width,
+                self.config.img_resolution[0],
+                self.config.img_resolution[0],
+            )
+            rgb_parts.append(rgb_cropped)
+        rgb = self.np.concatenate(rgb_parts, axis=1)
+        stressed["rgb"] = rgb
+        stressed["_raw_rgb_by_pos"] = stressed_raw_by_pos
+        stressed["image_mean"] = float(rgb.astype(self.np.float32).mean() / 255.0)
+        stressed["image_std"] = float(rgb.astype(self.np.float32).std() / 255.0)
+        stressed["front_image_mean"] = float(stressed_raw_by_pos["front"].astype(self.np.float32).mean() / 255.0)
+        stressed["front_image_std"] = float(stressed_raw_by_pos["front"].astype(self.np.float32).std() / 255.0)
+        return stressed
 
     def _get_position(self, tick_data: dict[str, Any]) -> Any:
         gps = tick_data["gps"]
@@ -735,6 +732,80 @@ class TransFuserRuntime:
                 self.logged_detection_failure = True
             rotated_bboxes = []
         return pred_wp, rotated_bboxes, fused_features, features
+
+    def _forward_once(
+        self,
+        model_input: dict[str, Any],
+        input_shapes: dict[str, Any],
+        *,
+        is_stuck: bool,
+        first_forced_move: bool,
+        safety_box: Any | None,
+    ) -> dict[str, Any]:
+        try:
+            with self.torch.no_grad():
+                raw_pred_wp, rotated_bb, fused_feature, features = self._forward_ego_with_feature(
+                    model_input["image"],
+                    model_input["lidar_bev"],
+                    model_input["target_point"],
+                    model_input["target_point_image"],
+                    model_input["velocity"],
+                    num_points=model_input.get("num_points"),
+                )
+        except Exception:
+            LOGGER.exception("TransFuser forward failed; model input shapes were: %s", input_shapes)
+            raise
+
+        pred_wp = self._postprocess_waypoints([raw_pred_wp])
+        control = self._control_from_waypoints(
+            pred_wp,
+            model_input["gt_velocity"],
+            is_stuck=is_stuck,
+            first_forced_move=first_forced_move,
+            safety_box=safety_box,
+            preserve_state=True,
+        )
+        return {
+            "pred_wp": pred_wp,
+            "rotated_bb": rotated_bb,
+            "fused_feature": fused_feature,
+            "features": features,
+            "gt_velocity": model_input["gt_velocity"],
+            "control": control,
+        }
+
+    def _control_from_waypoints(
+        self,
+        pred_wp: Any,
+        gt_velocity: Any,
+        *,
+        is_stuck: bool,
+        first_forced_move: bool,
+        safety_box: Any | None,
+        preserve_state: bool,
+    ) -> dict[str, Any]:
+        pid_state = e2e.snapshot_pid_controllers(self.net) if preserve_state else {}
+        steer, throttle, brake = self.net.control_pid(pred_wp, gt_velocity, is_stuck)
+        if preserve_state:
+            e2e.restore_pid_controllers(self.net, pid_state)
+        if first_forced_move:
+            steer = 0.0
+        if _as_bool(brake) or is_stuck:
+            steer = float(steer) * self.steer_damping
+
+        emergency_stop = False
+        if self.use_lidar_safe_check and safety_box is not None:
+            emergency_stop = len(safety_box) >= SAFETY_BOX_MIN_POINTS
+            if emergency_stop:
+                throttle = 0.0
+                brake = True
+
+        return {
+            "steer": _scalar_float(steer),
+            "throttle": _scalar_float(throttle),
+            "brake": _scalar_float(brake),
+            "emergency_stop": bool(emergency_stop),
+        }
 
     def _postprocess_waypoints(self, pred_wps: list[Any]) -> Any:
         pred_wp = self.torch.stack(pred_wps, dim=0).mean(dim=0)
@@ -1017,10 +1088,11 @@ def main(argv: list[str] | None = None) -> int:
         progress_tracker.reset_initial(ego_vehicle.get_location())
 
         scenario_id = f"{args.town}_spawn{spawn_index}_dest{destination_index}"
-        condition = "clean" if args.stress == "none" else "stress"
-        stress_type = None if args.stress == "none" else args.stress
-        severity = 0 if args.stress == "none" else args.stress_severity
+        intervention_policy = e2e.InterventionPolicy.from_args(args, "transfuser")
+        condition, stress_type, severity = intervention_policy.metadata_condition
         run_id = _build_run_id(scenario_id, condition, stress_type, severity, args.seed)
+        if intervention_policy.enabled:
+            run_id = f"{run_id}_iv-{intervention_policy.direction}-{intervention_policy.stage}"
         metadata = build_transfuser_run_metadata(
             run_id=run_id,
             scenario_id=scenario_id,
@@ -1031,29 +1103,35 @@ def main(argv: list[str] | None = None) -> int:
             town=args.town,
         )
 
-        for frame_idx in range(args.frames):
-            frame_id = world.tick()
-            packet = sensor_buffer.read(frame_id)
-            packet["speed"] = (frame_id, {"speed": _ego_speed(ego_vehicle)})
-            control, extracted = runtime.run_step(
-                packet,
-                timestamp=frame_idx * args.delta,
-                frame_id=frame_id,
-            )
-            ego_vehicle.apply_control(control)
+        with Sd2JsonlWriter(args.output, metadata) as jsonl_writer:
+            for frame_idx in range(args.frames):
+                frame_id = world.tick()
+                packet = sensor_buffer.read(frame_id)
+                packet["speed"] = (frame_id, {"speed": _ego_speed(ego_vehicle)})
+                control, extracted = runtime.run_step(
+                    packet,
+                    timestamp=frame_idx * args.delta,
+                    frame_id=frame_id,
+                )
+                ego_vehicle.apply_control(control)
 
-            extracted["frame_idx"] = frame_idx
-            extracted["timestamp"] = round(frame_idx * args.delta, 6)
-            extracted["ego"] = _ego_measurement(ego_vehicle)
-            extracted["outcome"] = {
-                "collision": _event_seen(collision_frames, frame_id, event_lock),
-                "lane_invasion": _event_seen(lane_invasion_frames, frame_id, event_lock),
-                "route_progress": progress_tracker.progress(ego_vehicle.get_location()),
-                "min_ttc": None,
-            }
-            frames.append(transfuser_record_to_sd2(extracted, run_id=run_id))
+                current_location = ego_vehicle.get_location()
+                route_progress = progress_tracker.progress(current_location)
+                extracted["frame_idx"] = frame_idx
+                extracted["timestamp"] = round(frame_idx * args.delta, 6)
+                extracted["ego"] = _ego_measurement(ego_vehicle)
+                extracted["outcome"] = {
+                    "collision": _event_seen(collision_frames, frame_id, event_lock),
+                    "lane_invasion": _event_seen(lane_invasion_frames, frame_id, event_lock),
+                    "route_progress": route_progress,
+                    "off_route": progress_tracker.off_route,
+                    "min_ttc": None,
+                }
+                frame = transfuser_record_to_sd2(extracted, run_id=run_id)
+                jsonl_writer.write_frame(frame)
+                frames.append(frame)
 
-        write_sd2_jsonl(args.output, metadata, frames)
+        e2e.write_intervention_sidecar(args.output, intervention_policy)
         _print_summary(args.output, frames)
         return 0
     finally:
@@ -1080,6 +1158,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--stress-severity", type=int, default=3)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--spawn-index", type=int, default=0)
+    e2e.add_intervention_args(parser)
     # Driving-diagnosis toggles for the "TransFuser holds station" investigation.
     parser.add_argument(
         "--debug-driving",
@@ -1123,6 +1202,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             validate_severity(args.stress_severity)
         except ValueError as exc:
             parser.error(str(exc))
+    e2e.validate_intervention_args(parser, args, "transfuser")
     return args
 
 
@@ -1442,7 +1522,11 @@ def _location_to_gps(lat_ref: float, lon_ref: float, location: Any) -> dict[str,
     mx = scale * lon_ref * math.pi * earth_radius_equator / 180.0
     my = scale * earth_radius_equator * math.log(math.tan((90.0 + lat_ref) * math.pi / 360.0))
     mx += location.x
-    my -= location.y
+    # CARLA 0.9.16's GNSS sensor reports latitude increasing with +y. The CARLA 0.9.10
+    # leaderboard code this was ported from negated y here; keeping that negation
+    # mirrors the whole global plan about y=0, so next_wp -- and therefore
+    # target_point -- points at a reflected goal and the ego drives off route.
+    my += location.y
     lon = mx * 180.0 / (math.pi * earth_radius_equator * scale)
     lat = 360.0 * math.atan(math.exp(my / (earth_radius_equator * scale))) / math.pi - 90.0
     return {"lat": lat, "lon": lon, "z": location.z}
@@ -1671,10 +1755,6 @@ def _as_bool(value: Any) -> bool:
     if hasattr(value, "item"):
         return bool(value.item())
     return bool(value)
-
-
-def _clamp(value: float, lower: float, upper: float) -> float:
-    return min(upper, max(lower, value))
 
 
 if __name__ == "__main__":

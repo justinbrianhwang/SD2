@@ -14,6 +14,7 @@ class Stage(StrEnum):
     PLANNING = "planning"
     CONTROL = "control"
     OUTCOME = "outcome"
+    INTERVENTION = "intervention"
 
     @classmethod
     def ordered(cls) -> list["Stage"]:
@@ -32,7 +33,7 @@ class Stage(StrEnum):
     def values(cls) -> list[str]:
         """Return stage values in pipeline order."""
 
-        return [stage.value for stage in cls.ordered()]
+        return [stage.value for stage in cls.ordered()] + [cls.INTERVENTION.value]
 
     def index(self) -> int:
         """Return this stage's pipeline index."""

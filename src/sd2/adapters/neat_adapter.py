@@ -11,7 +11,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sd2.adapters import transfuser_adapter as _tf
-from sd2.adapters.carla_adapter import write_sd2_jsonl
+from sd2.adapters.carla_adapter import Sd2JsonlWriter, write_sd2_jsonl
+from sd2.adapters.intervention_adapter import intervention_state
 from sd2.core.schema import FrameLog, RunMetadata
 
 
@@ -35,18 +36,22 @@ def neat_record_to_sd2(record: dict[str, Any], run_id: str) -> dict[str, Any]:
     planning = _planning_state(planning_record, record.get("ego"))
     control = _tf._control_state(control_record)
     outcome = _tf._outcome_state(outcome_record)
+    states = {
+        "vision": vision,
+        "semantic": semantic,
+        "planning": planning,
+        "control": control,
+        "outcome": outcome,
+    }
+    intervention = intervention_state(record.get("intervention"))
+    if intervention is not None:
+        states["intervention"] = intervention
 
     payload = {
         "run_id": str(run_id),
         "frame_idx": int(record.get("frame_idx", 0)),
         "timestamp": float(record.get("timestamp", 0.0)),
-        "states": {
-            "vision": vision,
-            "semantic": semantic,
-            "planning": planning,
-            "control": control,
-            "outcome": outcome,
-        },
+        "states": states,
     }
     frame = FrameLog.model_validate(payload)
     return {"type": "frame", **frame.model_dump(mode="json", exclude_none=True)}
@@ -108,6 +113,7 @@ def _planning_state(record: Any, ego_record: Any) -> dict[str, Any]:
 
 __all__ = [
     "NEAT_MODEL_ID",
+    "Sd2JsonlWriter",
     "build_neat_run_metadata",
     "neat_record_to_sd2",
     "write_sd2_jsonl",

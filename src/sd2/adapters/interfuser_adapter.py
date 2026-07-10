@@ -18,7 +18,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
 
-from sd2.adapters.carla_adapter import write_sd2_jsonl
+from sd2.adapters.carla_adapter import Sd2JsonlWriter, write_sd2_jsonl
+from sd2.adapters.intervention_adapter import intervention_state
 from sd2.core.schema import FrameLog, RunMetadata
 
 
@@ -39,18 +40,22 @@ def interfuser_record_to_sd2(record: dict[str, Any], run_id: str) -> dict[str, A
     planning = _planning_state(planning_record, record.get("ego"))
     control = _control_state(control_record)
     outcome = _outcome_state(outcome_record)
+    states = {
+        "vision": vision,
+        "semantic": semantic,
+        "planning": planning,
+        "control": control,
+        "outcome": outcome,
+    }
+    intervention = intervention_state(record.get("intervention"))
+    if intervention is not None:
+        states["intervention"] = intervention
 
     payload = {
         "run_id": str(run_id),
         "frame_idx": int(record.get("frame_idx", 0)),
         "timestamp": float(record.get("timestamp", 0.0)),
-        "states": {
-            "vision": vision,
-            "semantic": semantic,
-            "planning": planning,
-            "control": control,
-            "outcome": outcome,
-        },
+        "states": states,
     }
     frame = FrameLog.model_validate(payload)
     return {"type": "frame", **frame.model_dump(mode="json", exclude_none=True)}
@@ -191,6 +196,9 @@ def _outcome_state(record: Mapping[str, Any]) -> dict[str, Any]:
     route_progress = _optional_float(record.get("route_progress"))
     if route_progress is not None:
         state["route_progress"] = _clamp(route_progress, 0.0, 1.0)
+
+    if record.get("off_route") is not None:
+        state["off_route"] = bool(record.get("off_route"))
 
     min_ttc = _optional_float(record.get("min_ttc"))
     if min_ttc is not None:
@@ -358,6 +366,7 @@ def _clamp(value: float, lower: float, upper: float) -> float:
 
 __all__ = [
     "INTERFUSER_MODEL_ID",
+    "Sd2JsonlWriter",
     "build_interfuser_run_metadata",
     "interfuser_record_to_sd2",
     "write_sd2_jsonl",

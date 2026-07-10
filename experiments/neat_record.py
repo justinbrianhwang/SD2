@@ -20,9 +20,9 @@ from typing import Any
 
 from sd2.adapters.neat_adapter import (
     NEAT_MODEL_ID,
+    Sd2JsonlWriter,
     build_neat_run_metadata,
     neat_record_to_sd2,
-    write_sd2_jsonl,
 )
 from sd2.stressors import ImageStressor
 
@@ -107,10 +107,18 @@ class NEATRuntime:
         )
 
         self.route_planner = modules.RoutePlanner(4.0, 50.0)
-        self.input_buffer: dict[str, deque[Any]] = {
-            "rgb": deque(),
-            "rgb_left": deque(),
-            "rgb_right": deque(),
+        self.intervention = e2e.InterventionPolicy.from_args(args, NEAT_MODEL_ID)
+        self.input_buffer: dict[str, dict[str, deque[Any]]] = {
+            "clean_forward": {
+                "rgb": deque(),
+                "rgb_left": deque(),
+                "rgb_right": deque(),
+            },
+            "stress_forward": {
+                "rgb": deque(),
+                "rgb_left": deque(),
+                "rgb_right": deque(),
+            },
         }
         self.step = -1
         self.logged_shapes = False
@@ -139,7 +147,10 @@ class NEATRuntime:
                 "roll": 0.0,
                 "pitch": 0.0,
                 "yaw": 0.0,
-                "sensor_tick": 0.05,
+                # Must fire on every tick. A sensor_tick equal to the world delta eventually
+                # skips a tick to floating-point accumulation, and the recorder then blocks
+                # forever waiting for that frame's reading.
+                "sensor_tick": 0.0,
                 "id": "imu",
             },
             {
@@ -150,7 +161,9 @@ class NEATRuntime:
                 "roll": 0.0,
                 "pitch": 0.0,
                 "yaw": 0.0,
-                "sensor_tick": 0.01,
+                # Same trap as the imu: a sensor_tick at or above the world delta
+                # eventually skips a tick and the recorder blocks forever.
+                "sensor_tick": 0.0,
                 "id": "gps",
             },
             {"type": "sensor.speedometer", "reading_frequency": 20, "id": "speed"},
@@ -169,113 +182,94 @@ class NEATRuntime:
     ) -> tuple[Any, dict[str, Any]]:
         del timestamp
         self.step += 1
-        tick_data = self._tick(sensor_packet)
-        tensors = {
-            "rgb": self._rgb_tensor(tick_data["rgb"]),
-            "rgb_left": self._rgb_tensor(tick_data["rgb_left"]),
-            "rgb_right": self._rgb_tensor(tick_data["rgb_right"]),
-        }
+        tick_clean = self._tick(sensor_packet)
+        tick_stress = self._with_stressed_images(tick_clean)
         input_shapes = {
-            "images": e2e.shape_summary(list(tensors.values())),
-            "target_point": e2e.shape_summary(tick_data["target_point"]),
-            "gt_velocity": e2e.shape_summary(tick_data["speed"]),
+            "images": "clean/stress dual camera tensors",
+            "target_point": e2e.shape_summary(tick_stress["target_point"]),
+            "gt_velocity": e2e.shape_summary(tick_stress["speed"]),
         }
         if not self.logged_shapes:
             LOGGER.info("First NEAT sensor packet shapes: %s", e2e.sensor_shape_summary(sensor_packet))
             LOGGER.info("First NEAT model input shapes: %s", input_shapes)
 
-        for key, tensor in tensors.items():
-            if len(self.input_buffer[key]) >= self.config.seq_len:
-                self.input_buffer[key].popleft()
-            self.input_buffer[key].append(tensor)
-
-        if (
-            any(len(buffer) < self.config.seq_len for buffer in self.input_buffer.values())
-            or self.step < self.config.seq_len
-        ):
+        stress_forward = self._forward_once(tick_stress, "stress_forward", input_shapes)
+        clean_forward = self._forward_once(tick_clean, "clean_forward", input_shapes)
+        if stress_forward.get("warmup") or clean_forward.get("warmup"):
             control = self.modules.carla.VehicleControl()
             control.steer = 0.0
             control.throttle = 0.0
             control.brake = 0.0
-            return control, self._warmup_record(tick_data, control, frame_id)
+            return control, self._warmup_record(tick_stress, control, frame_id)
 
-        target_point = self.torch.tensor(
-            [[tick_data["target_point"][0]], [tick_data["target_point"][1]]],
-            device=self.device,
-            dtype=self.torch.float32,
+        planning_forward = (
+            clean_forward
+            if self.intervention.source_for_stage("planning") == "clean_forward"
+            else stress_forward
         )
-        gt_velocity = self.torch.tensor(
-            [tick_data["speed"]],
-            device=self.device,
-            dtype=self.torch.float32,
+        semantic_forward = (
+            clean_forward
+            if self.intervention.source_for_stage("semantic") == "clean_forward"
+            else stress_forward
         )
-        images = []
-        for index in range(self.config.seq_len):
-            images.append(self.input_buffer["rgb"][index])
-            if self.config.num_camera == 3:
-                images.append(self.input_buffer["rgb_left"][index])
-                images.append(self.input_buffer["rgb_right"][index])
-
-        try:
-            with self.torch.no_grad():
-                encoding = self.net.encoder(images, gt_velocity)
-                pred_waypoint_mean, red_light_occ = self.net.plan(
-                    target_point,
-                    encoding,
-                    self.plan_grid,
-                    self.light_grid,
-                    self.config.plan_points,
-                    self.config.plan_iters,
-                )
-        except Exception:
-            LOGGER.exception("NEAT forward failed; model input shapes were: %s", input_shapes)
-            raise
-
-        future_waypoints = pred_waypoint_mean[:, self.config.seq_len :]
-        future_waypoints_np = future_waypoints.detach().cpu().numpy()[0].copy()
-        steer, throttle, brake, metadata = self.net.control_pid(
-            future_waypoints,
-            gt_velocity,
-            target_point,
-            red_light_occ,
+        control_hybrid_planning_clean = None
+        control_hybrid_semantic_clean = None
+        if self.intervention.stage == "none":
+            control_hybrid_planning_clean, _planning_metadata = self._control_from_outputs(
+                clean_forward["future_waypoints"],
+                stress_forward["gt_velocity"],
+                stress_forward["target_point_tensor"],
+                stress_forward["red_light_occ"],
+                preserve_state=True,
+            )
+            control_hybrid_semantic_clean, _semantic_metadata = self._control_from_outputs(
+                stress_forward["future_waypoints"],
+                stress_forward["gt_velocity"],
+                stress_forward["target_point_tensor"],
+                clean_forward["red_light_occ"],
+                preserve_state=True,
+            )
+        applied_control, applied_metadata = self._control_from_outputs(
+            planning_forward["future_waypoints"],
+            stress_forward["gt_velocity"],
+            stress_forward["target_point_tensor"],
+            semantic_forward["red_light_occ"],
+            preserve_state=False,
         )
-        steer_value = e2e.scalar_float(steer)
-        throttle_value = e2e.scalar_float(throttle)
-        brake_value = e2e.scalar_float(brake)
-        if brake_value < 0.05:
-            brake_value = 0.0
-        if throttle_value > brake_value:
-            brake_value = 0.0
+        control = e2e.vehicle_control_from_dict(self.modules.carla, applied_control)
 
-        control = self.modules.carla.VehicleControl()
-        control.steer = steer_value
-        control.throttle = throttle_value
-        control.brake = brake_value
-
-        encoding_np = encoding.detach().cpu().numpy()
-        bev_seg_summary = self._try_bev_seg_summary(encoding, target_point)
-        red_light_occ_value = e2e.scalar_float(red_light_occ)
+        encoding_np = stress_forward["encoding"].detach().cpu().numpy()
+        bev_seg_summary = self._try_bev_seg_summary(
+            stress_forward["encoding"],
+            stress_forward["target_point_tensor"],
+        )
+        clean_bev_seg_summary = self._try_bev_seg_summary(
+            clean_forward["encoding"],
+            clean_forward["target_point_tensor"],
+        )
+        red_light_occ_value = e2e.scalar_float(stress_forward["red_light_occ"])
         if not self.logged_shapes:
             LOGGER.info(
                 "First NEAT model output shapes: %s",
                 {
-                    "encoding": e2e.shape_summary(encoding),
-                    "pred_waypoint_mean": e2e.shape_summary(pred_waypoint_mean),
-                    "red_light_occ": e2e.shape_summary(red_light_occ),
+                    "encoding": e2e.shape_summary(stress_forward["encoding"]),
+                    "pred_waypoint_mean": e2e.shape_summary(stress_forward["pred_waypoint_mean"]),
+                    "red_light_occ": e2e.shape_summary(stress_forward["red_light_occ"]),
                     "bev_seg_summary": e2e.shape_summary(bev_seg_summary),
                     "feature_source": "mean_pooled_encoder_tokens",
                 },
             )
             self.logged_shapes = True
 
-        target_speed = e2e.optional_float(metadata.get("desired_speed"))
+        future_waypoints_np = stress_forward["future_waypoints_np"]
+        target_speed = e2e.optional_float(stress_forward["metadata"].get("desired_speed"))
         if target_speed is None:
             target_speed = e2e.target_speed_from_waypoints(self.np, future_waypoints_np)
 
         extracted = {
             "vision": {
-                "image_mean": tick_data["image_mean"],
-                "image_std": tick_data["image_std"],
+                "image_mean": tick_stress["image_mean"],
+                "image_std": tick_stress["image_std"],
                 "feature": e2e.pool_feature(self.np, encoding_np),
                 "feature_source": "mean_pooled_encoder_tokens",
             },
@@ -288,8 +282,8 @@ class NEATRuntime:
             "planning": {
                 "waypoints": future_waypoints_np.astype(float).tolist(),
                 "target_speed": target_speed,
-                "target_point": tick_data["target_point"].astype(float).tolist(),
-                "command": int(tick_data["next_command"]),
+                "target_point": tick_stress["target_point"].astype(float).tolist(),
+                "command": int(tick_stress["next_command"]),
                 "planning_source": "attention_field_waypoints",
             },
             "control": {
@@ -299,8 +293,22 @@ class NEATRuntime:
             },
             "neat": {
                 "carla_frame": int(frame_id),
-                "pid_metadata": e2e.jsonable(metadata),
+                "pid_metadata": e2e.jsonable(applied_metadata),
             },
+            "intervention": e2e.build_intervention_block(
+                self.intervention,
+                control_from_stress_forward=stress_forward["control"],
+                control_from_clean_forward=clean_forward["control"],
+                planning_waypoints_clean_forward=clean_forward["future_waypoints_np"].astype(float).tolist(),
+                semantic_clean_forward={
+                    "bev_seg_summary": clean_bev_seg_summary,
+                    "objects": None,
+                    "red_light_occ": e2e.scalar_float(clean_forward["red_light_occ"]),
+                    "semantic_source": "bev_occupancy_decode",
+                },
+                control_hybrid_planning_clean=control_hybrid_planning_clean,
+                control_hybrid_semantic_clean=control_hybrid_semantic_clean,
+            ),
         }
         return control, extracted
 
@@ -313,19 +321,6 @@ class NEATRuntime:
         rgb_right = self.cv2.cvtColor(
             input_data["rgb_right"][1][:, :, :3],
             self.cv2.COLOR_BGR2RGB,
-        )
-        rgb = e2e.apply_visual_stress(rgb, self.stressor, self.args.stress_severity, self.stress_rng)
-        rgb_left = e2e.apply_visual_stress(
-            rgb_left,
-            self.stressor,
-            self.args.stress_severity,
-            self.stress_rng,
-        )
-        rgb_right = e2e.apply_visual_stress(
-            rgb_right,
-            self.stressor,
-            self.args.stress_severity,
-            self.stress_rng,
         )
         gps = input_data["gps"][1][:2]
         speed = float(input_data["speed"][1]["speed"])
@@ -356,6 +351,132 @@ class NEATRuntime:
             "image_mean": float(image_stack.mean() / 255.0),
             "image_std": float(image_stack.std() / 255.0),
         }
+
+    def _with_stressed_images(self, tick_data: dict[str, Any]) -> dict[str, Any]:
+        stressed = dict(tick_data)
+        for key in ("rgb", "rgb_left", "rgb_right"):
+            stressed[key] = e2e.apply_visual_stress(
+                tick_data[key],
+                self.stressor,
+                self.args.stress_severity,
+                self.stress_rng,
+            )
+        image_stack = self.np.concatenate(
+            [
+                stressed["rgb"].astype(self.np.float32).reshape(-1, 3),
+                stressed["rgb_left"].astype(self.np.float32).reshape(-1, 3),
+                stressed["rgb_right"].astype(self.np.float32).reshape(-1, 3),
+            ],
+            axis=0,
+        )
+        stressed["image_mean"] = float(image_stack.mean() / 255.0)
+        stressed["image_std"] = float(image_stack.std() / 255.0)
+        return stressed
+
+    def _forward_once(
+        self,
+        tick_data: dict[str, Any],
+        source: str,
+        input_shapes: dict[str, Any],
+    ) -> dict[str, Any]:
+        tensors = {
+            "rgb": self._rgb_tensor(tick_data["rgb"]),
+            "rgb_left": self._rgb_tensor(tick_data["rgb_left"]),
+            "rgb_right": self._rgb_tensor(tick_data["rgb_right"]),
+        }
+        buffers = self.input_buffer[source]
+        for key, tensor in tensors.items():
+            if len(buffers[key]) >= self.config.seq_len:
+                buffers[key].popleft()
+            buffers[key].append(tensor)
+
+        if any(len(buffer) < self.config.seq_len for buffer in buffers.values()) or self.step < self.config.seq_len:
+            return {"warmup": True}
+
+        target_point = self.torch.tensor(
+            [[tick_data["target_point"][0]], [tick_data["target_point"][1]]],
+            device=self.device,
+            dtype=self.torch.float32,
+        )
+        gt_velocity = self.torch.tensor(
+            [tick_data["speed"]],
+            device=self.device,
+            dtype=self.torch.float32,
+        )
+        images = []
+        for index in range(self.config.seq_len):
+            images.append(buffers["rgb"][index])
+            if self.config.num_camera == 3:
+                images.append(buffers["rgb_left"][index])
+                images.append(buffers["rgb_right"][index])
+
+        try:
+            with self.torch.no_grad():
+                encoding = self.net.encoder(images, gt_velocity)
+                pred_waypoint_mean, red_light_occ = self.net.plan(
+                    target_point,
+                    encoding,
+                    self.plan_grid,
+                    self.light_grid,
+                    self.config.plan_points,
+                    self.config.plan_iters,
+                )
+        except Exception:
+            LOGGER.exception("NEAT forward failed; model input shapes were: %s", input_shapes)
+            raise
+
+        future_waypoints = pred_waypoint_mean[:, self.config.seq_len :]
+        future_waypoints_np = future_waypoints.detach().cpu().numpy()[0].copy()
+        control, metadata = self._control_from_outputs(
+            future_waypoints,
+            gt_velocity,
+            target_point,
+            red_light_occ,
+            preserve_state=True,
+        )
+        return {
+            "warmup": False,
+            "encoding": encoding,
+            "pred_waypoint_mean": pred_waypoint_mean,
+            "future_waypoints": future_waypoints,
+            "future_waypoints_np": future_waypoints_np,
+            "red_light_occ": red_light_occ,
+            "gt_velocity": gt_velocity,
+            "target_point_tensor": target_point,
+            "control": control,
+            "metadata": metadata,
+        }
+
+    def _control_from_outputs(
+        self,
+        waypoints: Any,
+        gt_velocity: Any,
+        target_point: Any,
+        red_light_occ: Any,
+        *,
+        preserve_state: bool,
+    ) -> tuple[dict[str, float], dict[str, Any]]:
+        pid_state = e2e.snapshot_pid_controllers(self.net) if preserve_state else {}
+        steer, throttle, brake, metadata = self.net.control_pid(
+            waypoints,
+            gt_velocity,
+            target_point,
+            red_light_occ,
+        )
+        if preserve_state:
+            e2e.restore_pid_controllers(self.net, pid_state)
+        steer_value = e2e.scalar_float(steer)
+        throttle_value = e2e.scalar_float(throttle)
+        brake_value = e2e.scalar_float(brake)
+        if brake_value < 0.05:
+            brake_value = 0.0
+        if throttle_value > brake_value:
+            brake_value = 0.0
+        return {
+            "steer": steer_value,
+            "throttle": throttle_value,
+            "brake": brake_value,
+        }, metadata
 
     def _rgb_tensor(self, rgb: Any) -> Any:
         return self.torch.from_numpy(
@@ -410,6 +531,7 @@ class NEATRuntime:
             return None
 
     def _warmup_record(self, tick_data: dict[str, Any], control: Any, frame_id: int) -> dict[str, Any]:
+        neutral = e2e.control_to_dict(control)
         return {
             "vision": {
                 "image_mean": tick_data["image_mean"],
@@ -431,6 +553,13 @@ class NEATRuntime:
                 "brake": float(control.brake),
             },
             "neat": {"carla_frame": int(frame_id), "warmup": True},
+            "intervention": e2e.build_intervention_block(
+                self.intervention,
+                control_from_stress_forward=neutral,
+                control_from_clean_forward=neutral,
+                planning_waypoints_clean_forward=None,
+                semantic_clean_forward={"red_light_occ": None},
+            ),
         }
 
 
@@ -439,6 +568,7 @@ def main(argv: list[str] | None = None) -> int:
         argv,
         description="Record a NEAT synchronous CARLA run as SD2 JSONL.",
         default_checkpoint=DEFAULT_CHECKPOINT,
+        model_id=NEAT_MODEL_ID,
     )
     e2e.configure_logging()
     modules = _import_runtime_modules()
@@ -450,7 +580,7 @@ def main(argv: list[str] | None = None) -> int:
         model_label="NEAT",
         record_to_sd2=neat_record_to_sd2,
         build_run_metadata=build_neat_run_metadata,
-        write_sd2_jsonl=write_sd2_jsonl,
+        jsonl_writer_cls=Sd2JsonlWriter,
         logger=LOGGER,
     )
 
