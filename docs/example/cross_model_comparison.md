@@ -46,7 +46,7 @@ architecture-level robustness fingerprint SD2 is built to expose.
    waypoints → low desired speed → brake), *not* the LiDAR safety brake
    (`emergency_stop=False` throughout) or a wrong target-point frame. Engaging
    TransFuser's own creep controller in the crawl regime
-   (`--creep-speed 2.5 --creep-threshold 5 --creep-duration 60`) makes it drive
+   (`--tf-creep-speed 2.5 --tf-stuck-threshold 5 --tf-creep-duration 60`) makes it drive
    the route at ~4 m/s and complete ~85% of it (matching NEAT), so the
    planning/control comparison is now on a properly moving ego. See the README
    "Making TransFuser drive (anti-crawl creep)" section. The same cold-start

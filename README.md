@@ -574,12 +574,12 @@ low predicted speed. TransFuser already ships a **creep controller** (it forces
 
 The recorder exposes the creep so it can engage in the crawl regime:
 
-- `--creep-speed S` — count a frame toward the stuck detector when speed `< S`
+- `--tf-creep-speed S` — count a frame toward the stuck detector when speed `< S`
   (default `0.1` = original "only truly stopped"; set `2.5` to treat crawling as
   stuck). The detector only resets once the ego is clearly moving above `S`.
-- `--creep-threshold N` — engage the creep after `N` sub-`creep-speed` frames
+- `--tf-stuck-threshold N` — engage the creep after `N` sub-`tf-creep-speed` frames
   (overrides `config.stuck_threshold`).
-- `--creep-duration N` — how many frames each forced-move creep lasts
+- `--tf-creep-duration N` — how many frames each forced-move creep lasts
   (overrides `config.creep_duration`).
 - `--debug-driving` / `--no-lidar-safe-check` remain available for diagnosis.
 
@@ -593,14 +593,15 @@ The recorder exposes the creep so it can engage in the crawl regime:
 The creep settings are supplied like this:
 
 ```powershell
-# clean + gaussian-noise, anti-crawl creep engaged
-python experiments/transfuser_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 120 --warmup 20 --seed 42 --checkpoint models/TransFuser/checkpoints/models_2022/transfuser --stress none --creep-speed 2.5 --creep-threshold 5 --creep-duration 60 --output data/carla/transfuser_town10_clean_seed42.jsonl --spawn-index 0
-python experiments/transfuser_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 120 --warmup 20 --seed 42 --checkpoint models/TransFuser/checkpoints/models_2022/transfuser --stress gaussian_noise --stress-severity 3 --creep-speed 2.5 --creep-threshold 5 --creep-duration 60 --output data/carla/transfuser_town10_gaussian_noise_s3_seed42.jsonl --spawn-index 0
+# clean + gaussian-noise, TransFuser native creep engaged
+python experiments/transfuser_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 120 --warmup 20 --seed 42 --checkpoint models/TransFuser/checkpoints/models_2022/transfuser --stress none --tf-creep-speed 2.5 --tf-stuck-threshold 5 --tf-creep-duration 60 --output data/carla/transfuser_town10_clean_seed42.jsonl --spawn-index 0
+python experiments/transfuser_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 120 --warmup 20 --seed 42 --checkpoint models/TransFuser/checkpoints/models_2022/transfuser --stress gaussian_noise --stress-severity 3 --tf-creep-speed 2.5 --tf-stuck-threshold 5 --tf-creep-duration 60 --output data/carla/transfuser_town10_gaussian_noise_s3_seed42.jsonl --spawn-index 0
 sd2 analyze --clean data/carla/transfuser_town10_clean_seed42.jsonl --stress data/carla/transfuser_town10_gaussian_noise_s3_seed42.jsonl --config configs/mvp.yaml --output outputs/transfuser_town10_gaussian_noise_s3 --report
 ```
 
-The creep is TransFuser's own mechanism; `--creep-speed`/`--creep-threshold` only
-change *when* it engages, not the model's predictions. The same cold-start crawl
+The creep is TransFuser's own mechanism; `--tf-creep-speed`/`--tf-stuck-threshold`
+only change *when* it engages, not the model's predictions, and are separate from
+the shared `--anti-crawl`/`--creep-*` applied-throttle nudge below. The same cold-start crawl
 affects the AIM/CILRS/TCP camera baselines (NEAT escapes it on its own); those
 recorders instead take a generic `--anti-crawl` flag that nudges the *applied*
 throttle to give the ego a rolling start — see the next section.
@@ -643,17 +644,32 @@ models/NEAT/neat/args.txt
 models/TCP/checkpoints/tcp_b2d.ckpt
 ```
 
-**Anti-crawl (recommended).** AIM, CILRS, and TCP have no native creep
-controller, so from a standstill they fall into the same cold-start crawl
-limit-cycle described above and route progress stalls near zero. Their recorders
-accept a generic `--anti-crawl` flag that gives the ego a rolling start by
-nudging the **applied** throttle in sustained bursts while it crawls; the
-**recorded** control stage still holds the model's raw steer/throttle/brake, so
-the clean-vs-stress control comparison stays a pure model measurement. With
-`--anti-crawl --creep-speed 2.5 --creep-frames 4 --creep-throttle 0.6 --creep-duration 40`,
-all three complete ~85–90% of the route at a moving speed. Flags:
-`--creep-speed` (crawl threshold m/s), `--creep-frames` (crawl frames before a
-burst), `--creep-throttle` (burst throttle), `--creep-duration` (burst length).
+**Anti-crawl (per model, not a global protocol).** Some checkpoints fall into a
+cold-start crawl limit-cycle from a standstill and route progress stalls near
+zero. All six recorders accept a generic `--anti-crawl` flag that gives the ego a
+rolling start by nudging the **applied** throttle in sustained bursts while it
+crawls. The **recorded** control stage still holds the model's raw
+steer/throttle/brake, so the clean-vs-stress control comparison stays a pure model
+measurement; nudged frames are flagged in the recorded control state as
+`anti_crawl_applied`, alongside the `applied_throttle` actually sent to the
+simulator, so the nudge is auditable offline and an ablation can cite exact frame
+counts.
+
+Which models need it was **measured**, not assumed — see
+[the re-evaluation](docs/recorder_bug_audit.md#anti-crawl-re-evaluation-after-the-coordinate-fix).
+InterFuser needs no nudge; its apparent crawl was an artifact of the mirrored-plan
+bug. AIM and TransFuser genuinely crawl. Anti-crawl is **not innocuous**: it gets
+AIM moving, but the run goes `off_route`, so a "driving" AIM run under anti-crawl is
+not following the route it is being scored on. Route-completion claims for AIM and
+TransFuser under anti-crawl are not currently defensible; the earlier
+"~85–90% of the route" figure came from the fabricated route tracker and is
+withdrawn.
+
+Flags: `--creep-speed` (crawl threshold m/s), `--creep-frames` (crawl frames before
+a burst), `--creep-throttle` (burst throttle), `--creep-duration` (burst length).
+These shared `--creep-*` flags control the anti-crawl applied-throttle nudge, not
+TransFuser's native `--tf-*` creep overrides described above; the two mechanisms are
+independent and may both be active at once.
 
 Record and analyze AIM (with anti-crawl):
 

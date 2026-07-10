@@ -2,6 +2,8 @@
 
 Verifying the counterfactual-intervention work surfaced nine defects in the CARLA recording
 pipeline. Two of them silently corrupted the driving itself and the metric used to report it.
+Verifying *those* fixes surfaced five more, of a different kind: command-line flags that were
+accepted and then silently ignored. Fourteen in total, all listed below.
 
 **Every live CARLA result recorded before this audit is invalid and must be re-recorded.** That
 includes the robustness fingerprints, the cross-stress and cross-town tables, the anti-crawl
@@ -210,18 +212,114 @@ Anti-crawl therefore stays, scoped to the models that need it, and must be repor
 than as a global protocol. Claims about AIM's and TransFuser's route completion under anti-crawl are
 not yet defensible.
 
-**Gap found while measuring:** `transfuser_record.py` keeps its own argument parser and accepts
-neither `--num-vehicles`/`--num-walkers` nor `--anti-crawl`, so it cannot yet be run with NPC traffic
-or under the shared anti-crawl protocol. Also, the adapters store only `steer`/`throttle`/`brake`, so
-the recorder's `anti_crawl_applied` marker never reaches the JSONL and the number of nudged frames is
-not recoverable from a recording.
+**Gaps found while measuring, all since closed.** See
+[the copy-paste gaps](#the-copy-paste-gaps-flags-that-parsed-and-did-nothing) below.
+
+---
+
+## The copy-paste gaps: flags that parsed and did nothing
+
+Measuring the anti-crawl protocol exposed a second family of defects. Three recorders
+(`interfuser`, `tcp`, `transfuser`) kept their own `argparse` parser and their own drive loop
+instead of the shared `parse_record_args` / `run_recording`. The copies had drifted. The failure
+mode is the worst kind: a flag is **accepted** on the command line and then **silently ignored**,
+so a run appears configured and is not.
+
+The coverage before the fix, established by asking each recorder's own `--help`:
+
+| recorder | parser | `--num-vehicles` | `--anti-crawl` | nudge runs? | NPCs spawn? | teardown |
+| --- | --- | --- | --- | --- | --- | --- |
+| aim, cilrs, neat | shared | yes | yes | yes | yes | shared |
+| interfuser | own | yes | **no** | — | yes | shared |
+| tcp | own | **no** | yes | yes | via shared loop | shared |
+| transfuser | own | **no** | **no** | — | **no** | **own, stale copy** |
+
+Five distinct defects fell out of this.
+
+1. **`transfuser_record.py` accepted no NPC-traffic or anti-crawl flags at all.** It could not be
+   run under the protocol the other recorders use.
+2. **The anti-crawl marker never reached the JSONL.** `run_recording` writes
+   `anti_crawl_applied` and `applied_throttle` onto the control record, but every adapter's
+   `_control_state` returned only `{steer, throttle, brake}` and dropped them. The number of nudged
+   frames was unrecoverable from a recording, so no anti-crawl ablation could cite it.
+3. **`--anti-crawl` parsed and did nothing on `interfuser` and `transfuser`.** Only four of the six
+   recorders call `e2e.run_recording`; those two have their own drive loops, which contained no
+   anti-crawl logic. Adding the flag to their parsers — the obvious fix — would have made the
+   problem worse by making it look configured.
+4. **`--num-vehicles` parsed and spawned nothing on `transfuser`.** It never called
+   `spawn_npc_traffic` and never wrote a `.scene.json` sidecar, so its runs were also the only ones
+   that did not record requested-vs-spawned actor counts.
+5. **`interfuser` and `transfuser` carried byte-identical stale copies of `cleanup`.** Both predate
+   the NPC-teardown fix in §4: they destroy vehicles without first calling
+   `set_autopilot(False, tm_port)`. InterFuser's copy was dead code (zero call sites; it correctly
+   calls `e2e.cleanup`), but TransFuser's was live. **Wiring TransFuser's NPC spawning without also
+   fixing its teardown would have reintroduced the server-poisoning bug of §4 outright.** The spawn
+   and the teardown had to be fixed in one change.
+
+### A silent collision that nearly landed
+
+TransFuser already used `--creep-speed`, `--creep-duration` and `--creep-threshold` to override its
+**own** native stuck/creep controller. The shared parser uses `--creep-speed` and `--creep-duration`
+for the completely unrelated **anti-crawl applied-throttle nudge**, with different defaults. Merging
+TransFuser onto the shared parser as-is would have silently changed `crawl_speed` from `0.1` to
+`2.0` and overwritten `config.creep_duration` with `40` — on every run, including runs with no
+`--anti-crawl` flag. The README documented both meanings under the same flag name.
+
+TransFuser's native flags are now `--tf-creep-speed`, `--tf-creep-duration`, `--tf-stuck-threshold`.
+The old spellings were removed rather than aliased, so a stale command line fails loudly:
+`transfuser_record.py --creep-threshold 5` now exits with status 2.
+
+### Fixes
+
+One parser (`parse_record_args`, with an `extra_args` hook for model-specific flags), one nudge
+(`AntiCrawlNudger`, called from all three drive loops), one teardown (`e2e.cleanup`; both stale
+copies deleted). `ControlState` now declares `anti_crawl_applied` and `applied_throttle`, and every
+adapter passes them through — while the recorded `throttle` stays the **model's raw output**, so the
+diagnosis never sees the protocol's intervention.
+
+### Verification
+
+`AntiCrawlNudger` was checked frame-by-frame against a verbatim transcription of the inline block it
+replaced, over 9 configurations × 30 trials × 200 frames: **identical**, including the un-nudged
+counter updates and the `getattr` fallbacks that fire for a parser without the flags.
+
+Live, 120 frames each, one CARLA server for all five runs:
+
+| run | nudged frames | `applied_throttle` present |
+| --- | --- | --- |
+| aim, no `--anti-crawl` | 0 | 0 |
+| aim, `--anti-crawl` | 95 | 95 |
+| interfuser, `--anti-crawl` | 119 | 119 |
+| transfuser, `--anti-crawl` | 93 | 93 |
+| transfuser, native creep only | 0 | 0 |
+
+The InterFuser row used `--creep-speed 100` so that every frame counts as a crawl. That is a probe of
+the wiring, not a driving protocol: InterFuser drives at ~5 m/s and needs no nudge.
+
+NPC spawning and teardown, four consecutive runs on one server (a single run proves nothing about
+poisoning — the bug in §4 only appears on the *next* run):
+
+| run | scene sidecar | actors left on server | poisoned |
+| --- | --- | --- | --- |
+| transfuser, 5 vehicles + 5 walkers | `veh 5/5  walk 5/5` | 0/0 | no |
+| transfuser, 5 vehicles + 5 walkers | `veh 5/5  walk 5/5` | 0/0 | no |
+| interfuser, 5 vehicles + 5 walkers | `veh 5/5  walk 5/5` | 0/0 | no |
+| transfuser, no traffic | `veh 0/0  walk 0/0` | 0/0 | no |
+
+`--tf-creep-speed 2.5 --tf-stuck-threshold 5` was confirmed to still drive TransFuser's own creep
+(`Detected TransFuser stuck state; forced_move=0..6`), independently of the outer nudge.
+
+Three AST regression tests now fail any recorder that accepts `--num-vehicles` without reaching
+`spawn_npc_traffic`, `write_scene_sidecar` and `e2e.cleanup`, and any recorder that re-introduces a
+local `_cleanup`. That is the general form of the defect, not just its five instances.
 
 ---
 
 ## Verification status
 
-All nine fixes are covered by the pure test suite (194 tests) and, where the defect only manifests
-against a live simulator, by a live CARLA check. The first coherent recording after the fixes:
+All fourteen fixes are covered by the pure test suite (240 tests) and, where the defect only
+manifests against a live simulator, by a live CARLA check. The first coherent recording after the
+fixes:
 
 ```
 InterFuser, Town10HD_Opt, spawn 0, 300 frames, no stress, no traffic
