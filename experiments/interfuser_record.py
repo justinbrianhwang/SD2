@@ -764,16 +764,20 @@ def main(argv: list[str] | None = None) -> int:
             town=args.town,
         )
 
+        anti_crawl_nudger = e2e.AntiCrawlNudger(args)
+
         with Sd2JsonlWriter(args.output, metadata) as jsonl_writer:
             for frame_idx in range(args.frames):
                 frame_id = world.tick()
                 packet = sensor_buffer.read(frame_id)
-                packet["speed"] = (frame_id, {"speed": _ego_speed(ego_vehicle)})
+                current_speed = _ego_speed(ego_vehicle)
+                packet["speed"] = (frame_id, {"speed": current_speed})
                 control, extracted = runtime.run_step(
                     packet,
                     timestamp=frame_idx * args.delta,
                     frame_id=frame_id,
                 )
+                anti_crawl_nudger.apply(control, extracted, current_speed)
                 ego_vehicle.apply_control(control)
 
                 current_location = ego_vehicle.get_location()
@@ -850,71 +854,13 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
+    return e2e.parse_record_args(
+        argv,
         description="Record an InterFuser synchronous CARLA run as SD2 JSONL.",
+        default_checkpoint=DEFAULT_CHECKPOINT,
+        model_id="interfuser",
+        checkpoint_required=DEFAULT_CHECKPOINT is None,
     )
-    parser.add_argument("--host", default="localhost")
-    parser.add_argument("--port", type=int, default=2000)
-    parser.add_argument("--town", default="Town10HD_Opt")
-    parser.add_argument("--frames", type=int, default=300)
-    parser.add_argument("--warmup", type=int, default=20)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--delta", type=float, default=0.05)
-    parser.add_argument(
-        "--checkpoint",
-        type=Path,
-        default=DEFAULT_CHECKPOINT,
-        required=DEFAULT_CHECKPOINT is None,
-        help=(
-            "Path to the InterFuser weights. Defaults to the $INTERFUSER_CKPT "
-            "environment variable; required when that is unset."
-        ),
-    )
-    parser.add_argument(
-        "--stress",
-        choices=["none", "gaussian_noise", "motion_blur", "brightness", "fog"],
-        default="none",
-    )
-    parser.add_argument("--stress-severity", type=int, default=3)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--spawn-index", type=int, default=0)
-    parser.add_argument(
-        "--dest-index",
-        type=int,
-        default=None,
-        help="optional destination spawn point index; omitted preserves the default opposite-spawn route",
-    )
-    parser.add_argument(
-        "--num-vehicles",
-        type=int,
-        default=0,
-        help="number of deterministic NPC vehicles to request (default 0)",
-    )
-    parser.add_argument(
-        "--num-walkers",
-        type=int,
-        default=0,
-        help="number of deterministic NPC walkers to request (default 0)",
-    )
-    e2e.add_intervention_args(parser)
-    args = parser.parse_args(argv)
-    if args.frames < 0:
-        parser.error("--frames must be non-negative")
-    if args.warmup < 0:
-        parser.error("--warmup must be non-negative")
-    if args.delta <= 0:
-        parser.error("--delta must be positive")
-    if args.num_vehicles < 0:
-        parser.error("--num-vehicles must be non-negative")
-    if args.num_walkers < 0:
-        parser.error("--num-walkers must be non-negative")
-    if args.stress != "none":
-        try:
-            validate_severity(args.stress_severity)
-        except ValueError as exc:
-            parser.error(str(exc))
-    e2e.validate_intervention_args(parser, args, "interfuser")
-    return args
 
 
 def _configure_logging() -> None:
@@ -1406,44 +1352,6 @@ def _print_summary(path: Path, frames: list[dict[str, Any]]) -> None:
         f"{len(frames)} frames to {path} | collisions={collisions} "
         f"lane_invasions={lane_invasions} final_route_progress={final_progress:.3f}"
     )
-
-
-def _cleanup(
-    carla: Any | None,
-    world: Any | None,
-    traffic_manager: Any | None,
-    sensors: list[Any],
-    ego_vehicle: Any | None,
-) -> None:
-    del carla
-    for sensor in sensors:
-        try:
-            if sensor is not None and sensor.is_alive:
-                sensor.stop()
-                sensor.destroy()
-        except RuntimeError:
-            pass
-
-    try:
-        if ego_vehicle is not None and ego_vehicle.is_alive:
-            ego_vehicle.destroy()
-    except RuntimeError:
-        pass
-
-    if traffic_manager is not None:
-        try:
-            traffic_manager.set_synchronous_mode(False)
-        except RuntimeError:
-            pass
-
-    if world is not None:
-        try:
-            settings = world.get_settings()
-            settings.synchronous_mode = False
-            settings.fixed_delta_seconds = None
-            world.apply_settings(settings)
-        except RuntimeError:
-            pass
 
 
 def _distance(left: Any, right: Any) -> float:

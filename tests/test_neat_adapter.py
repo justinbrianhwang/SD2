@@ -94,6 +94,24 @@ def test_neat_record_to_sd2_handles_missing_optional_fields() -> None:
     assert frame.states[Stage.OUTCOME].route_progress == 1.0
 
 
+def test_neat_control_anti_crawl_marker_is_conditional() -> None:
+    marked = _synthetic_record(0, feature_delta=0.0, bev=_bev_summary(90, 5, 5, 0, 0))
+    marked["control"]["anti_crawl_applied"] = True
+    marked["control"]["applied_throttle"] = 0.6
+
+    marked_frame = neat_record_to_sd2(marked, run_id="neat_clean")
+    marked_control = marked_frame["states"]["control"]
+
+    assert marked_control["anti_crawl_applied"] is True
+    assert marked_control["applied_throttle"] == pytest.approx(0.6)
+
+    clean_frame = neat_record_to_sd2(
+        _synthetic_record(1, feature_delta=0.0, bev=_bev_summary(90, 5, 5, 0, 0)),
+        run_id="neat_clean",
+    )
+    assert set(clean_frame["states"]["control"]) == {"steer", "throttle", "brake"}
+
+
 def test_build_neat_run_metadata_validates_run_metadata() -> None:
     metadata_record = build_neat_run_metadata(
         run_id="neat_Town10HD_Opt_spawn0_dest10_clean_seed42",

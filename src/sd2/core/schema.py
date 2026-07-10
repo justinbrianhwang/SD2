@@ -64,6 +64,10 @@ class ControlState(StateBase):
     steer: float | None = None
     throttle: float | None = None
     brake: float | None = None
+    # throttle remains the model's raw output; applied_throttle is the command
+    # sent to the simulator during an anti-crawl nudge.
+    anti_crawl_applied: bool | None = None
+    applied_throttle: float | None = None
 
 
 class OutcomeState(StateBase):

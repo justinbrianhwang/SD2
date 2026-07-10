@@ -666,43 +666,16 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
+    def add_tcp_args(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--planner-type", choices=PLANNER_TYPES, default="only_traj")
+
+    return e2e.parse_record_args(
+        argv,
         description="Record a TCP Bench2Drive synchronous CARLA run as SD2 JSONL.",
+        default_checkpoint=DEFAULT_CHECKPOINT,
+        model_id=TCP_MODEL_ID,
+        extra_args=add_tcp_args,
     )
-    parser.add_argument("--host", default="localhost")
-    parser.add_argument("--port", type=int, default=2000)
-    parser.add_argument("--town", default="Town10HD_Opt")
-    parser.add_argument("--frames", type=int, default=300)
-    parser.add_argument("--warmup", type=int, default=20)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--delta", type=float, default=0.05)
-    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
-    parser.add_argument("--planner-type", choices=PLANNER_TYPES, default="only_traj")
-    parser.add_argument("--stress", choices=e2e.STRESS_CHOICES, default="none")
-    parser.add_argument("--stress-severity", type=int, default=3)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--spawn-index", type=int, default=0)
-    e2e.add_intervention_args(parser)
-    # Anti-crawl driving aid (see experiments/_carla_e2e_common.run_recording).
-    parser.add_argument("--anti-crawl", action="store_true")
-    parser.add_argument("--creep-speed", type=float, default=2.0)
-    parser.add_argument("--creep-frames", type=int, default=5)
-    parser.add_argument("--creep-throttle", type=float, default=0.6)
-    parser.add_argument("--creep-duration", type=int, default=40)
-    args = parser.parse_args(argv)
-    if args.frames < 0:
-        parser.error("--frames must be non-negative")
-    if args.warmup < 0:
-        parser.error("--warmup must be non-negative")
-    if args.delta <= 0:
-        parser.error("--delta must be positive")
-    if args.stress != "none":
-        try:
-            validate_severity(args.stress_severity)
-        except ValueError as exc:
-            parser.error(str(exc))
-    e2e.validate_intervention_args(parser, args, TCP_MODEL_ID)
-    return args
 
 
 def _apply_model_preamble() -> None:

@@ -213,11 +213,17 @@ def _planning_state(record: Mapping[str, Any], ego_record: Any) -> dict[str, Any
 
 
 def _control_state(record: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+    control = {
         "steer": _optional_float(record.get("steer"), default=0.0),
         "throttle": _optional_float(record.get("throttle"), default=0.0),
         "brake": _optional_float(record.get("brake"), default=0.0),
     }
+    if record.get("anti_crawl_applied") is not None:
+        control["anti_crawl_applied"] = bool(record.get("anti_crawl_applied"))
+    applied = _optional_float(record.get("applied_throttle"))
+    if applied is not None:
+        control["applied_throttle"] = applied
+    return control
 
 
 def _outcome_state(record: Mapping[str, Any]) -> dict[str, Any]:

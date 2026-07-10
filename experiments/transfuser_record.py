@@ -271,18 +271,19 @@ class TransFuserRuntime:
         # The reviewer runs these live to isolate why TransFuser holds station.
         self.use_lidar_safe_check = not bool(getattr(args, "no_lidar_safe_check", False))
         self.debug_driving = bool(getattr(args, "debug_driving", False))
-        creep_threshold = getattr(args, "creep_threshold", None)
-        if creep_threshold is not None:
-            self.config.stuck_threshold = int(creep_threshold)
-        creep_duration = getattr(args, "creep_duration", None)
+        tf_stuck_threshold = getattr(args, "tf_stuck_threshold", None)
+        if tf_stuck_threshold is not None:
+            self.config.stuck_threshold = int(tf_stuck_threshold)
+        creep_duration = getattr(args, "tf_creep_duration", None)
         if creep_duration is not None:
             self.config.creep_duration = int(creep_duration)
-        # Anti-crawl: count a frame toward the stuck detector when speed is below
-        # this threshold, and only reset when the ego is clearly moving above it.
+        # TransFuser native creep: count a frame toward the stuck detector when
+        # speed is below this threshold, and only reset when the ego is clearly
+        # moving above it.
         # Default 0.1 m/s keeps the original "only truly stopped counts" behavior;
         # raising it (e.g. 2.0) lets the creep controller break the cold-start
         # limit-cycle where short predicted waypoints keep the ego crawling.
-        self.crawl_speed = float(getattr(args, "creep_speed", None) or 0.1)
+        self.crawl_speed = float(getattr(args, "tf_creep_speed", None) or 0.1)
         self.step = -1
         self.stuck_detector = 0
         self.forced_move = 0
@@ -991,19 +992,27 @@ def main(argv: list[str] | None = None) -> int:
     stressor, stress_rng = _build_image_stressor(args, modules)
     rng = random.Random(args.seed)
 
-    client = modules.carla.Client(args.host, args.port)
-    client.set_timeout(20.0)
-
+    client = None
     world = None
     traffic_manager = None
     ego_vehicle = None
     sensors: list[Any] = []
+    npc_vehicles: list[Any] = []
+    npc_walkers: list[Any] = []
+    npc_walker_controllers: list[Any] = []
+    scene_counts = {
+        "vehicles": {"requested": int(args.num_vehicles), "spawned": 0},
+        "walkers": {"requested": int(args.num_walkers), "spawned": 0},
+    }
     frames: list[dict[str, Any]] = []
     collision_frames: set[int] = set()
     lane_invasion_frames: set[int] = set()
     event_lock = Lock()
 
     try:
+        client = modules.carla.Client(args.host, args.port)
+        client.set_timeout(20.0)
+
         world = client.load_world(args.town)
         traffic_manager = client.get_trafficmanager()
         traffic_manager.set_synchronous_mode(True)
@@ -1030,6 +1039,22 @@ def main(argv: list[str] | None = None) -> int:
             rng,
         )
         world.tick()
+
+        npc_vehicles, npc_walkers, npc_walker_controllers = e2e.spawn_npc_traffic(
+            modules.carla,
+            world,
+            blueprint_library,
+            traffic_manager,
+            spawn_points,
+            ego_spawn_index=spawn_index,
+            num_vehicles=scene_counts["vehicles"]["requested"],
+            num_walkers=scene_counts["walkers"]["requested"],
+            seed=args.seed,
+            rng=rng,
+            logger=LOGGER,
+        )
+        scene_counts["vehicles"]["spawned"] = len(npc_vehicles)
+        scene_counts["walkers"]["spawned"] = len(npc_walkers)
 
         runtime = TransFuserRuntime(args, modules, stressor, stress_rng)
         event_sensors = _attach_event_sensors(
@@ -1062,14 +1087,16 @@ def main(argv: list[str] | None = None) -> int:
 
         gps_plan = _build_sparse_gps_plan(world, route_transforms)
         route_locations = [transform.location for transform, _road_option in route_transforms]
+        route_length_meters = e2e.route_length(route_locations)
         progress_tracker = RouteProgressTracker(route_locations)
         runtime.set_global_plan(gps_plan)
 
         LOGGER.info(
-            "Route ready: town=%s spawn=%d dest=%d dense_points=%d sparse_points=%d",
+            "Route ready: town=%s spawn=%d dest=%d route_length_m=%.1f dense_points=%d sparse_points=%d",
             args.town,
             spawn_index,
             destination_index,
+            route_length_meters,
             len(route_transforms),
             len(gps_plan),
         )
@@ -1103,16 +1130,22 @@ def main(argv: list[str] | None = None) -> int:
             town=args.town,
         )
 
+        anti_crawl_nudger = e2e.AntiCrawlNudger(args)
+
         with Sd2JsonlWriter(args.output, metadata) as jsonl_writer:
             for frame_idx in range(args.frames):
                 frame_id = world.tick()
                 packet = sensor_buffer.read(frame_id)
-                packet["speed"] = (frame_id, {"speed": _ego_speed(ego_vehicle)})
+                current_speed = _ego_speed(ego_vehicle)
+                packet["speed"] = (frame_id, {"speed": current_speed})
                 control, extracted = runtime.run_step(
                     packet,
                     timestamp=frame_idx * args.delta,
                     frame_id=frame_id,
                 )
+                # TransFuser's native --tf-* stuck/creep controller is separate
+                # from this outer final-control override; both may be active.
+                anti_crawl_nudger.apply(control, extracted, current_speed)
                 ego_vehicle.apply_control(control)
 
                 current_location = ego_vehicle.get_location()
@@ -1132,78 +1165,104 @@ def main(argv: list[str] | None = None) -> int:
                 frames.append(frame)
 
         e2e.write_intervention_sidecar(args.output, intervention_policy)
+        e2e.write_scene_sidecar(
+            args.output,
+            town=args.town,
+            spawn_index=spawn_index,
+            dest_index=destination_index,
+            seed=args.seed,
+            vehicles=scene_counts["vehicles"],
+            walkers=scene_counts["walkers"],
+            frames=args.frames,
+            delta=args.delta,
+            route_length_meters=route_length_meters,
+        )
         _print_summary(args.output, frames)
         return 0
     finally:
-        _cleanup(modules.carla if "modules" in locals() else None, world, traffic_manager, sensors, ego_vehicle)
+        try:
+            e2e.cleanup(
+                modules.carla if "modules" in locals() else None,
+                world,
+                traffic_manager,
+                sensors,
+                ego_vehicle,
+                npc_vehicles,
+                npc_walkers,
+                npc_walker_controllers,
+            )
+        finally:
+            # Drop CARLA wrappers before frame teardown picks an arbitrary order.
+            extracted = None
+            _extracted = None
+            control = None
+            packet = None
+            runtime = None
+            progress_tracker = None
+            route_locations = None
+            gps_plan = None
+            route_transforms = None
+            route = None
+            basic_agent = None
+            destination = None
+            sensor_buffer = None
+            transfuser_sensors = None
+            event_sensors = None
+            sensors = []
+            npc_walker_controllers = []
+            npc_walkers = []
+            npc_vehicles = []
+            ego_vehicle = None
+            spawn_points = None
+            blueprint_library = None
+            settings = None
+            traffic_manager = None
+            world = None
+            client = None
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
+    def add_transfuser_args(parser: argparse.ArgumentParser) -> None:
+        # Driving-diagnosis toggles for the "TransFuser holds station" investigation.
+        parser.add_argument(
+            "--debug-driving",
+            action="store_true",
+            help="log per-tick driving state (speed, is_stuck, emergency_stop, waypoints, control)",
+        )
+        parser.add_argument(
+            "--no-lidar-safe-check",
+            action="store_true",
+            help="disable the LiDAR safety-box emergency brake to test if it causes station-holding",
+        )
+        parser.add_argument(
+            "--tf-stuck-threshold",
+            type=int,
+            default=None,
+            help="override TransFuser's config.stuck_threshold (frames of ~zero speed before its own creep engages; unrelated to --anti-crawl)",
+        )
+        parser.add_argument(
+            "--tf-creep-duration",
+            type=int,
+            default=None,
+            help="override TransFuser's config.creep_duration (frames its own forced-move creep is applied; unrelated to --anti-crawl)",
+        )
+        parser.add_argument(
+            "--tf-creep-speed",
+            type=float,
+            default=None,
+            help="speed (m/s) below which a frame counts as crawling toward TransFuser's own creep "
+            "trigger; default 0.1 (only truly stopped). Set e.g. 2.0 with a low "
+            "--tf-stuck-threshold to break the cold-start crawl limit-cycle. "
+            "Unrelated to --anti-crawl.",
+        )
+
+    return e2e.parse_record_args(
+        argv,
         description="Record a TransFuser synchronous CARLA run as SD2 JSONL.",
+        default_checkpoint=DEFAULT_CHECKPOINT,
+        model_id="transfuser",
+        extra_args=add_transfuser_args,
     )
-    parser.add_argument("--host", default="localhost")
-    parser.add_argument("--port", type=int, default=2000)
-    parser.add_argument("--town", default="Town10HD_Opt")
-    parser.add_argument("--frames", type=int, default=300)
-    parser.add_argument("--warmup", type=int, default=20)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--delta", type=float, default=0.05)
-    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
-    parser.add_argument(
-        "--stress",
-        choices=["none", "gaussian_noise", "motion_blur", "brightness", "fog"],
-        default="none",
-    )
-    parser.add_argument("--stress-severity", type=int, default=3)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--spawn-index", type=int, default=0)
-    e2e.add_intervention_args(parser)
-    # Driving-diagnosis toggles for the "TransFuser holds station" investigation.
-    parser.add_argument(
-        "--debug-driving",
-        action="store_true",
-        help="log per-tick driving state (speed, is_stuck, emergency_stop, waypoints, control)",
-    )
-    parser.add_argument(
-        "--no-lidar-safe-check",
-        action="store_true",
-        help="disable the LiDAR safety-box emergency brake to test if it causes station-holding",
-    )
-    parser.add_argument(
-        "--creep-threshold",
-        type=int,
-        default=None,
-        help="override config.stuck_threshold (frames of ~zero speed before creep engages)",
-    )
-    parser.add_argument(
-        "--creep-duration",
-        type=int,
-        default=None,
-        help="override config.creep_duration (frames the forced-move creep is applied)",
-    )
-    parser.add_argument(
-        "--creep-speed",
-        type=float,
-        default=None,
-        help="speed (m/s) below which a frame counts as crawling toward the creep "
-        "trigger; default 0.1 (only truly stopped). Set e.g. 2.0 with a low "
-        "--creep-threshold to break the cold-start crawl limit-cycle.",
-    )
-    args = parser.parse_args(argv)
-    if args.frames < 0:
-        parser.error("--frames must be non-negative")
-    if args.warmup < 0:
-        parser.error("--warmup must be non-negative")
-    if args.delta <= 0:
-        parser.error("--delta must be positive")
-    if args.stress != "none":
-        try:
-            validate_severity(args.stress_severity)
-        except ValueError as exc:
-            parser.error(str(exc))
-    e2e.validate_intervention_args(parser, args, "transfuser")
-    return args
 
 
 def _configure_logging() -> None:
@@ -1664,44 +1723,6 @@ def _print_summary(path: Path, frames: list[dict[str, Any]]) -> None:
         f"{len(frames)} frames to {path} | collisions={collisions} "
         f"lane_invasions={lane_invasions} final_route_progress={final_progress:.3f}"
     )
-
-
-def _cleanup(
-    carla: Any | None,
-    world: Any | None,
-    traffic_manager: Any | None,
-    sensors: list[Any],
-    ego_vehicle: Any | None,
-) -> None:
-    del carla
-    for sensor in sensors:
-        try:
-            if sensor is not None and sensor.is_alive:
-                sensor.stop()
-                sensor.destroy()
-        except RuntimeError:
-            pass
-
-    try:
-        if ego_vehicle is not None and ego_vehicle.is_alive:
-            ego_vehicle.destroy()
-    except RuntimeError:
-        pass
-
-    if traffic_manager is not None:
-        try:
-            traffic_manager.set_synchronous_mode(False)
-        except RuntimeError:
-            pass
-
-    if world is not None:
-        try:
-            settings = world.get_settings()
-            settings.synchronous_mode = False
-            settings.fixed_delta_seconds = None
-            world.apply_settings(settings)
-        except RuntimeError:
-            pass
 
 
 def _distance(left: Any, right: Any) -> float:

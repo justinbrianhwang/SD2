@@ -119,6 +119,10 @@ def test_cleanup_unregisters_npc_vehicles_before_destroying_actors() -> None:
     assert log.index("npc1.set_autopilot(False,4455)") < log.index("world.tick")
     assert log.index("world.tick") < log.index("npc0.destroy")
     assert log.index("world.tick") < log.index("npc1.destroy")
+    assert max(
+        log.index("npc0.set_autopilot(False,4455)"),
+        log.index("npc1.set_autopilot(False,4455)"),
+    ) < min(log.index("npc0.destroy"), log.index("npc1.destroy"))
     assert world.tick_count == 1
 
     for actor in [sensor, controller, walker, *npc_vehicles, ego_vehicle]:

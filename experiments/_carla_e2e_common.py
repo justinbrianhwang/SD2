@@ -176,6 +176,44 @@ class InterventionPolicy:
         return record
 
 
+class AntiCrawlNudger:
+    """Applied-throttle nudge for models trapped in a cold-start crawl.
+
+    The RECORDED control stage keeps the model's raw output; only the control
+    actually sent to the simulator is overridden, and every nudged frame is
+    flagged in the recorded control state so the nudge is auditable offline.
+    """
+
+    def __init__(self, args) -> None:
+        self._enabled = bool(getattr(args, "anti_crawl", False))
+        self.creep_speed = float(getattr(args, "creep_speed", 2.0))
+        self.creep_frames = int(getattr(args, "creep_frames", 5))
+        self.creep_throttle = float(getattr(args, "creep_throttle", 0.6))
+        self.creep_duration = int(getattr(args, "creep_duration", 40))
+        self.crawl_counter = 0
+        self.burst_remaining = 0
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def apply(self, control, extracted, current_speed) -> bool:
+        """Mutate `control` in place if a nudge is engaged. Return whether it nudged."""
+        self.crawl_counter = self.crawl_counter + 1 if current_speed < self.creep_speed else 0
+        if self.enabled and self.burst_remaining == 0 and self.crawl_counter >= self.creep_frames:
+            self.burst_remaining = self.creep_duration
+            self.crawl_counter = 0
+        if self.enabled and self.burst_remaining > 0:
+            control.throttle = self.creep_throttle
+            control.brake = 0.0
+            self.burst_remaining -= 1
+            if isinstance(extracted.get("control"), dict):
+                extracted["control"]["anti_crawl_applied"] = True
+                extracted["control"]["applied_throttle"] = self.creep_throttle
+            return True
+        return False
+
+
 def unsupported_intervention_message(model_id: str, stage: str) -> str:
     normalized_model = str(model_id).lower()
     normalized_stage = str(stage)
@@ -319,8 +357,10 @@ def parse_record_args(
     argv: list[str] | None,
     *,
     description: str,
-    default_checkpoint: Path,
+    default_checkpoint: Path | None,
     model_id: str | None = None,
+    extra_args: Callable[[argparse.ArgumentParser], None] | None = None,
+    checkpoint_required: bool = False,
 ) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--host", default="localhost")
@@ -330,7 +370,19 @@ def parse_record_args(
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--delta", type=float, default=0.05)
-    parser.add_argument("--checkpoint", type=Path, default=default_checkpoint)
+    checkpoint_help = None
+    if model_id == "interfuser":
+        checkpoint_help = (
+            "Path to the InterFuser weights. Defaults to the $INTERFUSER_CKPT "
+            "environment variable; required when that is unset."
+        )
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=default_checkpoint,
+        required=checkpoint_required,
+        help=checkpoint_help,
+    )
     parser.add_argument("--stress", choices=STRESS_CHOICES, default="none")
     parser.add_argument("--stress-severity", type=int, default=3)
     parser.add_argument("--output", type=Path, required=True)
@@ -390,6 +442,8 @@ def parse_record_args(
         help="frames each anti-crawl throttle burst is sustained once engaged "
         "(builds momentum instead of fighting per-frame braking; default 40)",
     )
+    if extra_args is not None:
+        extra_args(parser)
     args = parser.parse_args(argv)
     if args.frames < 0:
         parser.error("--frames must be non-negative")
@@ -612,13 +666,7 @@ def run_recording(
             town=args.town,
         )
 
-        anti_crawl = bool(getattr(args, "anti_crawl", False))
-        creep_speed = float(getattr(args, "creep_speed", 2.0))
-        creep_frames = int(getattr(args, "creep_frames", 5))
-        creep_throttle = float(getattr(args, "creep_throttle", 0.6))
-        creep_duration = int(getattr(args, "creep_duration", 40))
-        crawl_counter = 0
-        burst_remaining = 0
+        anti_crawl_nudger = AntiCrawlNudger(args)
 
         with jsonl_writer_cls(args.output, metadata) as jsonl_writer:
             for frame_idx in range(args.frames):
@@ -632,21 +680,7 @@ def run_recording(
                     frame_id=frame_id,
                 )
 
-                # Anti-crawl nudge: the recorded control stage (built inside run_step)
-                # keeps the model's raw output; only the APPLIED throttle is nudged.
-                # Once engaged, the throttle burst is sustained for creep_duration
-                # frames to build momentum instead of fighting per-frame model braking.
-                crawl_counter = crawl_counter + 1 if current_speed < creep_speed else 0
-                if anti_crawl and burst_remaining == 0 and crawl_counter >= creep_frames:
-                    burst_remaining = creep_duration
-                    crawl_counter = 0
-                if anti_crawl and burst_remaining > 0:
-                    control.throttle = creep_throttle
-                    control.brake = 0.0
-                    burst_remaining -= 1
-                    if isinstance(extracted.get("control"), dict):
-                        extracted["control"]["anti_crawl_applied"] = True
-                        extracted["control"]["applied_throttle"] = creep_throttle
+                anti_crawl_nudger.apply(control, extracted, current_speed)
 
                 ego_vehicle.apply_control(control)
 

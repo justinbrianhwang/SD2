@@ -88,6 +88,21 @@ def test_aim_record_to_sd2_handles_missing_optional_fields() -> None:
     assert "min_ttc" not in frame_record["states"]["outcome"]
 
 
+def test_aim_control_anti_crawl_marker_is_conditional() -> None:
+    marked = _synthetic_record(0, feature_delta=0.0)
+    marked["control"]["anti_crawl_applied"] = True
+    marked["control"]["applied_throttle"] = 0.6
+
+    marked_frame = aim_record_to_sd2(marked, run_id="aim_clean")
+    marked_control = marked_frame["states"]["control"]
+
+    assert marked_control["anti_crawl_applied"] is True
+    assert marked_control["applied_throttle"] == pytest.approx(0.6)
+
+    clean_frame = aim_record_to_sd2(_synthetic_record(1, feature_delta=0.0), run_id="aim_clean")
+    assert set(clean_frame["states"]["control"]) == {"steer", "throttle", "brake"}
+
+
 def test_build_aim_run_metadata_validates_run_metadata() -> None:
     metadata_record = build_aim_run_metadata(
         run_id="aim_Town10HD_Opt_spawn0_dest10_clean_seed42",

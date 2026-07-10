@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 
+import pytest
+
 from sd2.adapters.jsonl_adapter import load_run_jsonl
 from sd2.adapters.tcp_adapter import (
     build_tcp_run_metadata,
@@ -113,6 +115,27 @@ def test_tcp_record_to_sd2_handles_missing_optional_fields() -> None:
     assert frame.states[Stage.OUTCOME].route_progress == 1.0
     assert Stage.SEMANTIC not in frame.states
     assert "min_ttc" not in frame_record["states"]["outcome"]
+
+
+def test_tcp_control_anti_crawl_marker_is_conditional() -> None:
+    marked = _synthetic_record(0, feature_delta=0.0)
+    marked["control"]["anti_crawl_applied"] = True
+    marked["control"]["applied_throttle"] = 0.6
+
+    marked_frame = tcp_record_to_sd2(marked, run_id="tcp_clean")
+    marked_control = marked_frame["states"]["control"]
+
+    assert marked_control["anti_crawl_applied"] is True
+    assert marked_control["applied_throttle"] == pytest.approx(0.6)
+
+    clean_frame = tcp_record_to_sd2(_synthetic_record(1, feature_delta=0.0), run_id="tcp_clean")
+    assert set(clean_frame["states"]["control"]) == {
+        "steer",
+        "throttle",
+        "brake",
+        "planner_type",
+        "details",
+    }
 
 
 def test_build_tcp_run_metadata_validates_run_metadata() -> None:

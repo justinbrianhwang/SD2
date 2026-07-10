@@ -129,6 +129,11 @@ def carla_frame_to_sd2(record: dict[str, Any], run_id: str) -> dict[str, Any]:
         "throttle": _optional_float(control_record.get("throttle"), default=0.0),
         "brake": _optional_float(control_record.get("brake"), default=0.0),
     }
+    if control_record.get("anti_crawl_applied") is not None:
+        control["anti_crawl_applied"] = bool(control_record.get("anti_crawl_applied"))
+    applied = _optional_float(control_record.get("applied_throttle"))
+    if applied is not None:
+        control["applied_throttle"] = applied
 
     outcome: dict[str, Any] = {
         "collision": bool(record.get("collision", False)),
