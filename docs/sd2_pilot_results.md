@@ -1,5 +1,16 @@
 # SD2 pilot analysis — InterFuser under input stress (2026-07-11)
 
+> **SUPERSEDED IN PART (2026-07-11).** The conclusions in the last two sections —
+> "There is no stable route" and "outcome-level confirmation is not available under
+> 0.9.16" — were an artifact of only testing long opposite-spawn routes through
+> junctions. Short, straight, spawn-aligned routes on which InterFuser drives
+> stably (clean completion 0.99, noise floor sd ~0.0005) do exist, and on two of
+> them the counterfactual chain closes at the route-completion level:
+> semantic-restore recovers 98-99% of a total gaussian_noise-s5 stall while
+> planning-restore recovers ~0%. See
+> [sd2_outcome_level_result.md](sd2_outcome_level_result.md). The control- and
+> behavioral-level findings below stand as written.
+
 This is the first analysis run on recordings made after the eighteen recorder fixes and the sensor
 configuration fix (see [recorder_bug_audit.md](recorder_bug_audit.md)). It is a **pilot**: one model,
 one route, one stressor family. Its purpose is to show the pipeline end to end and to establish what

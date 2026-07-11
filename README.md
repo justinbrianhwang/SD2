@@ -235,6 +235,34 @@ of the intervened run, such as route completion, collisions, and lane
 invasions. The genuinely informative control-level decomposition exists only
 for InterFuser and NEAT, where multiple stage outputs feed the controller.
 
+#### Confirmed result: the causal chain closes at the outcome level
+
+On short, straight, spawn-aligned routes where InterFuser drives stably
+(clean route completion ~0.99, noise floor sd ~0.0005), the counterfactual chain
+closes at the closed-loop **route-completion** level, on two independent routes
+and across three analysis levels. Under gaussian_noise s5 InterFuser stalls
+completely; restoring the clean **semantic** stage recovers it, restoring
+**planning** does not:
+
+| condition (route 31->36) | route completion |
+| --- | ---: |
+| clean | 0.9990 ± 0.0005 |
+| gaussian_noise s5 | 0.0000 ± 0.0000 |
+| + semantic-restore | **0.9778 ± 0.0001** (97.9% recovery) |
+| + planning-restore | 0.0000 ± 0.0000 (0%) |
+
+Route 53->107 replicates (semantic recovery 99.1%, planning 1.0%). Different
+corruptions localize to different stages: gaussian_noise -> semantic (total
+stall), motion_blur -> planning (a 0.10 degradation with collisions, recovered
+only by planning-restore); brightness and fog do not meaningfully degrade this
+route. On route 31->36 the *correlational* diagnosis labels the stall "planning",
+but the counterfactual localizes it to "semantic" and the outcome recovery proves
+the counterfactual right — the counterfactual is stable where the correlational
+label is not. Full protocol, numbers, and scope in
+[docs/sd2_outcome_level_result.md](docs/sd2_outcome_level_result.md). This is
+InterFuser only; TransFuser/CILRS full-brake, AIM/TCP crawl, and NEAT collides
+under 0.9.10-era checkpoints in 0.9.16.
+
 ### Hard Benchmark Tier
 
 The benchmark also has a hard profile with competing and ambiguous faults:
