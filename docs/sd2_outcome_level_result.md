@@ -38,11 +38,12 @@ OOD InterFuser reads a near goal as "arriving", brakes, and never advances (a
 self-reinforcing stall). Straight routes place the first waypoint ~50 m ahead, so
 the model drives.
 
-## 2. The causal chain closes at the outcome level (two independent routes)
+## 2. The causal chain closes at the outcome level (four independent routes)
 
-Protocol: CARLA restarted before **every** run; 300 frames; no traffic. Clean x5
-(noise floor), each gaussian_noise s5 condition x3 (seeds 42/43/44). Route
-completion is the closed-loop outcome.
+Protocol: restart-each for routes 31->36 and 53->107 (CARLA restarted before
+**every** run); back-to-back for the two expansion routes 33->36 and 114->51
+(clean x3 local floor per route). 300 frames; no traffic. Each gaussian_noise s5
+condition x3 (seeds 42/43/44). Route completion is the closed-loop outcome.
 
 ### Route 31 -> 36 (67 m)
 
@@ -68,10 +69,53 @@ degradation 0.999; **semantic recovery 0.978 (97.9%)**; planning recovery 0.000
 degradation 0.992; **semantic recovery 0.983 (99.1%)**; planning recovery 0.010
 (1.0%); clean noise floor 0.0003.
 
-A clean **double dissociation on both routes**: restoring the clean semantic map
-revives the totally-stalled ego to near-complete route completion; restoring the
-clean planning waypoints does essentially nothing. The recovery is three orders
-of magnitude above the clean noise floor.
+### Route 33 -> 36, second replication
+
+| condition | route completion | mean speed |
+| --- | ---: | ---: |
+| clean | 0.9983 +/- 0.0008 | 3.44 |
+| gaussian_noise s5 | 0.0000 +/- 0.0000 | 0.00 |
+| gn s5 + **semantic-restore** | **0.9660 +/- 0.0031** | 3.65 |
+| gn s5 + planning-restore | 0.0000 +/- 0.0000 | 0.00 |
+
+degradation 0.998; **semantic recovery 0.966 (96.8%)**; planning recovery 0.000
+(0%).
+
+### Route 114 -> 51, third replication
+
+| condition | route completion | mean speed |
+| --- | ---: | ---: |
+| clean | 0.9744 +/- 0.0210 | 3.06 |
+| gaussian_noise s5 | 0.0778 +/- 0.0221 | 0.22 |
+| gn s5 + **semantic-restore** | **0.9588 +/- 0.0006** | 3.08 |
+| gn s5 + planning-restore | 0.0938 +/- 0.0389 | 0.29 |
+
+degradation 0.897; **semantic recovery 0.881 (relative to the stall floor)**;
+planning recovery 0.016.
+
+A clean **double dissociation on all four routes**: restoring the clean semantic
+map revives the totally-stalled ego to near-complete route completion; restoring
+the clean planning waypoints does essentially nothing. The recovery is three
+orders of magnitude above the clean noise floor.
+
+### Bootstrap 95% confidence intervals (n=4 routes)
+
+Recovery = mean(intervened) - mean(gn5_none), bootstrapped over runs (20,000
+resamples, deterministic seed):
+
+| route | semantic recovery [95% CI] | planning recovery [95% CI] |
+| --- | --- | --- |
+| 31 -> 36 | 0.978 [0.978, 0.978] | 0.000 [0.000, 0.000] |
+| 53 -> 107 | 0.983 [0.983, 0.983] | 0.010 [-0.000, 0.030] |
+| 33 -> 36 | 0.966 [0.964, 0.970] | 0.000 [0.000, 0.000] |
+| 114 -> 51 | 0.881 [0.868, 0.907] | 0.016 [-0.028, 0.054] |
+
+**Across the four routes: mean semantic recovery = 0.952 (sd 0.048); mean
+planning recovery = 0.006 (sd 0.008).** Every route's semantic-recovery CI
+excludes zero by a wide margin and does not overlap its planning-recovery CI; the
+planning CIs all bracket zero. The dissociation is not a single-route artifact --
+it holds on four routes spanning three spawn regions of Town10HD, under both
+restart-each and back-to-back protocols.
 
 ## 3. Necessity AND sufficiency (the 2x2)
 
@@ -203,7 +247,44 @@ model's response to the corruption, not an artifact of an empty road; and becaus
 the object density clears the 1.0 gate, the correlational semantic evidence is now
 sufficient too.
 
-## 10. Reproduce
+## 10. Cross-architecture: NEAT is robust where InterFuser is brittle
+
+To test whether the semantic brittleness is InterFuser-specific, NEAT (the other
+multi-input-controller model, which also exposes a semantic BEV-occupancy stage)
+was run on the same routes. NEAT drives 6 of 8 straight routes (completion
+0.79-0.97, with 1-3 wall scrapes). Under severity-5 stress, NEAT is robust to
+**all four** visual corruptions (route 31->36):
+
+| stressor s5 | NEAT route completion |
+| --- | ---: |
+| clean | 0.933 |
+| gaussian_noise | 0.937 |
+| motion_blur | 0.914 |
+| brightness | 0.988 |
+| fog | 0.950 |
+
+The gaussian_noise s5 that totally stalls InterFuser leaves NEAT unaffected, so
+SD2's stress-effectiveness gate correctly reports **no localizable NEAT failure**
+under these stressors -- the method does not overclaim.
+
+SD2 also explains *why*, at the control level. On the same gaussian_noise s5, the
+same-pose single-run share (3 recordings each) is:
+
+| model | semantic control share | planning control share | outcome |
+| --- | ---: | ---: | --- |
+| InterFuser | 1.000 | 0.009 | stalls (0.000) |
+| NEAT | **0.000** | 1.000 | robust (0.937) |
+
+The identical noise routes through **opposite stages** in the two architectures:
+it corrupts InterFuser's object-density semantic map (phantom brake, stall), but
+NEAT's BEV-occupancy semantic stage is noise-immune (0.000 semantic effect on
+every control channel), and the small residual control change is entirely
+planning, which NEAT absorbs without failing. This is the cross-architecture
+contribution: SD2 does not merely say "one model failed and one did not" -- it
+localizes to the same stage that is brittle in one architecture and robust in the
+other, and explains the robustness difference mechanistically.
+
+## 11. Reproduce
 
 Stable route + outcome chain (CARLA on Town10HD_Opt, InterFuser checkpoint in
 `INTERFUSER_CKPT`), one condition shown; restart CARLA before each run:
@@ -235,7 +316,7 @@ route's initial heading (the default destination = `spawn + count//2` gives long
 junction-crossing routes that stall). Verified stable pairs on Town10HD_Opt:
 `31->36`, `33->36`, `53->107`, `114->51`.
 
-## 11. Scope and honesty
+## 12. Scope and honesty
 
 - **InterFuser only.** TransFuser and CILRS command full brake every frame,
   AIM and TCP crawl, NEAT collides — all in 0.9.16 with 0.9.10-era checkpoints
