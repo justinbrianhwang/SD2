@@ -14,7 +14,7 @@ A modern E2E model is a black box from sensors to actuation. SD2 "opens" it into
 
 ![Opening the E2E black box into functional stages](assets/images/fig2_pipeline.png)
 
-We deliberately say *scene representation* rather than *scene understanding*: InterFuser's object density, TransFuser's BEV detections, and NEAT's BEV occupancy are semantic **representations**, not human-style understanding. A `reasoning` stage also exists in the schema, but it is **optional** and used only by language-based driving agents — it plays no part in the E2E experiments reported here.
+We deliberately say *scene representation* rather than *scene understanding*: InterFuser's object density and NEAT's BEV occupancy are semantic **representations**, not human-style understanding. A `reasoning` stage also exists in the schema, but it is **optional** and used only by language-based driving agents — it plays no part in the E2E experiments reported here.
 
 ## How it works
 
@@ -30,8 +30,8 @@ SD2 pairs a **clean run** with a **stress run** frame by frame, computes a norma
 > progress-tracker defect. They are kept only to show the *shape* of SD2's output
 > and will be regenerated once re-recording finishes.
 
-A CARLA closed-loop **TransFuser** run produces a per-stage **robustness
-fingerprint** — higher is more robust:
+A CARLA closed-loop run produces a per-stage **robustness fingerprint** — higher
+is more robust:
 
 ![Robustness fingerprint](docs/example/robustness_fingerprint.png)
 
@@ -48,49 +48,42 @@ See the full generated report at [docs/example/example_report.md](docs/example/e
 ## Cross-architecture comparison
 
 Because SD2 is architecture-agnostic, it can diagnose different E2E models under
-the *same* stress and reveal that they fail at *different* stages.
+the *same* stress and reveal that they fail at *different* stages. Established on
+re-recorded runs: **InterFuser and NEAT fail at different stages under the same
+corruption** — "divergent semantic collapse" — including the safety-critical
+**RUSH probe** red-light result. The same Gaussian noise freezes InterFuser
+(phantom obstacles, semantic object-density stage) and blinds NEAT into running
+red lights (semantic `red_light_occ` signal); restoring a single internal
+semantic signal reverses each. See "Confirmed result: NEAT, divergent semantic
+collapse, and the RUSH probe" below, with full numbers and scope in
+[docs/sd2_outcome_level_result.md](docs/sd2_outcome_level_result.md).
 
-> **The specific cross-model claims previously stated here (InterFuser collapsing
-> at the semantic stage, TransFuser at the vision/feature stage) rested on
-> recordings invalidated by the [pipeline audit](docs/recorder_bug_audit.md) and
-> have been withdrawn.** The figure below illustrates the comparison SD2 is
-> designed to make; it is not current evidence.
->
-> A **new, valid** cross-architecture result has since been established on
-> re-recorded runs: InterFuser and NEAT fail at *different* stages under the same
-> corruption ("divergent semantic collapse"), including the safety-critical
-> **RUSH probe** red-light result. See "Confirmed result: NEAT, divergent
-> semantic collapse, and the RUSH probe" below.
-
-![Cross-architecture failure comparison: semantic-stage vs feature-stage collapse](assets/images/fig4_cross_model.png)
-
-Details and the honest caveats are in [docs/example/cross_model_comparison.md](docs/example/cross_model_comparison.md).
+> Note: earlier cross-model claims in this section (from before the
+> [pipeline audit](docs/recorder_bug_audit.md)) were withdrawn; the results above
+> are the re-recorded replacement.
 
 ### E2E models & source repositories
 
-SD2 diagnoses six published E2E driving models. The model weights and code are
+SD2 diagnoses published E2E driving models; this study focuses on the two that
+yield a localizable stressor-induced failure (InterFuser and NEAT). The weights and code are
 consumed read-only through gitignored `models/` junctions; nothing in this repo
 redistributes them. Original sources:
 
 | Model | Source repository | Paper (venue) | Sensors | Stages SD2 records | Semantic on the control path? |
 | --- | --- | --- | --- | --- | --- |
 | **InterFuser** | [opendilab/InterFuser](https://github.com/opendilab/InterFuser) | Shao et al., CoRL 2022 | camera + LiDAR | vision, semantic (object density), planning, control | **Yes** — object-density map feeds the controller (valid semantic intervention) |
-| **TransFuser** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Prakash et al., CVPR 2021 · Chitta et al., TPAMI 2023 | camera + LiDAR | vision, semantic (BEV-seg / detections), planning, control | **No** — detection head is a side output off the control path (semantic intervention is a hard error) |
-| **AIM** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Prakash et al., CVPR 2021 (baseline) | camera | vision, planning, control | No semantic head |
-| **CILRS** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Codevilla et al., ICCV 2019 (reimpl.) | camera | vision, control | No semantic head; no waypoints |
-| **NEAT** | [autonomousvision/neat](https://github.com/autonomousvision/neat) | Chitta et al., ICCV 2021 | multi-camera | vision, semantic (BEV occupancy), planning, control | **Partly** — the recorded BEV-occupancy map is a side output off the path; only `red_light_occ` feeds the controller |
-| **TCP** | [OpenDriveLab/TCP](https://github.com/OpenDriveLab/TCP) · weights [Thinklab-SJTU/Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo) | Wu et al., NeurIPS 2022 | camera | vision, planning, control | No semantic head |
+| **NEAT** | [autonomousvision/neat](https://github.com/autonomousvision/neat) | Chitta et al., ICCV 2021 | multi-camera | vision, semantic (BEV occupancy + `red_light_occ`), planning, control | **Partly** — the recorded BEV-occupancy map is a side output off the path; only `red_light_occ` feeds the controller |
 
-"Stages SD2 records" means SD2 logs a representation at that stage — it does **not** imply that stage lies on the causal path to control. Whether the semantic representation actually feeds the controller (and is therefore a valid intervention target) is the last column, and it matches the intervention support matrix in the "Counterfactual stage intervention" section below. Only InterFuser (object density) and NEAT (`red_light_occ`) expose a semantic signal that reaches control; TransFuser's detections and NEAT's BEV-occupancy map are recorded but off-path.
+"Stages SD2 records" means SD2 logs a representation at that stage — it does **not** imply that stage lies on the causal path to control. Whether the semantic representation actually feeds the controller (and is therefore a valid intervention target) is the last column, and it matches the intervention support matrix in the "Counterfactual stage intervention" section below. InterFuser exposes an on-path semantic signal (object density) everywhere; NEAT exposes one (`red_light_occ`) only where a red light is present, while its recorded BEV-occupancy map is off-path. The recorder is architecture-agnostic, but this study reports InterFuser and NEAT — the two models that yield a localizable stressor-induced failure under 0.9.10-era checkpoints in CARLA 0.9.16.
 
 ## Results: live CARLA robustness diagnosis
 
 > **Withdrawn pending re-recording (2026-07-10).** An audit of the recording
 > pipeline found nine defects, two of which corrupted the driving itself and the
 > metric used to report it. Every live CARLA number previously published in this
-> section — robustness fingerprints, cross-stress and cross-town tables, the
-> anti-crawl ablation, and every route-completion figure — was produced by that
-> broken pipeline and has been removed rather than quietly restated.
+> section — robustness fingerprints, cross-stress and cross-town tables, and
+> every route-completion figure — was produced by that broken pipeline and has
+> been removed rather than quietly restated.
 >
 > The evidence, the isolation experiments, and the verification of each fix are in
 > [docs/recorder_bug_audit.md](docs/recorder_bug_audit.md). The two defects that
@@ -98,7 +91,7 @@ redistributes them. Original sources:
 >
 > 1. **The global plan was mirrored about y = 0.** `_location_to_gps` used the
 >    CARLA 0.9.10 convention, but 0.9.16's GNSS reports latitude increasing with
->    `+y`. All six models were steering toward a reflected goal. Measured live, the
+>    `+y`. Every model was steering toward a reflected goal. Measured live, the
 >    plan-vs-sensor delta was 48.99 m; after the fix, 0.16 m.
 > 2. **Route completion was fabricated by an index teleport.** The progress
 >    tracker searched the whole remaining route for the nearest waypoint, so where
@@ -119,46 +112,13 @@ comparable across models. SD2 therefore reports two summaries:
 - **Observed-stage mean** — averages whichever stages that model exposes. Use it
   for *within-model* diagnosis. It is **not** a cross-model ranking: a model is
   penalised simply for exposing a fragile stage that another model hides.
-- **Common-stage mean** — averages the stages **every** model exposes, i.e.
-  `vision + control` (CILRS regresses control directly and predicts no waypoints,
-  and AIM/CILRS/TCP have no semantic head). Use it for *cross-model* comparison.
+- **Common-stage mean** — averages the stages **every** compared model exposes on
+  the causal path (e.g. `vision + planning + control`), since models differ in
+  which semantic signal reaches the controller. Use it for *cross-model*
+  comparison.
 
 `sd2 fingerprint` emits both columns, and `fingerprint.json` carries
 `common_stage_mean` alongside `mean_robustness`.
-
-#### Evaluation protocol: anti-crawl, per model
-
-Some checkpoints sit in a cold-start crawl limit-cycle from a standstill, which
-would make every deviation a near-stationary artifact. The **anti-crawl protocol**
-applies a throttle burst to the *applied* actuation only; the recorded `control`
-stage still holds the model's raw output, and the protocol is applied identically
-to the clean and the stress run.
-
-After the coordinate fix, anti-crawl was re-measured rather than assumed. Each run:
-Town10HD_Opt, spawn 0, 300 frames (15 s), seed 42, no stress, no traffic, CARLA
-restarted before every run. Speed is the ego's recorded speed, not a proxy.
-
-| Run | Route progress | `off_route` | Mean speed | Frames moving | Displacement |
-| --- | ---: | :---: | ---: | ---: | ---: |
-| InterFuser, no anti-crawl | 0.2551 | false | 4.95 m/s | 300/300 | 72.8 m |
-| AIM, no anti-crawl | 0.0245 | false | 0.66 m/s | 178/300 | 9.8 m |
-| AIM, with anti-crawl | 0.0391 | **true** | 3.48 m/s | 276/300 | 46.4 m |
-| TransFuser, default | 0.0073 | false | 0.12 m/s | 36/300 | 1.8 m |
-
-Three findings, all of which contradict what we assumed before measuring:
-
-- **InterFuser needs no anti-crawl.** It drives at 4.95 m/s and stays on route.
-  Its previous crawling was entirely an artifact of the mirrored plan.
-- **AIM and TransFuser genuinely crawl.** The coordinate fix did not help them, so
-  the crawl is a property of those checkpoints. Anti-crawl remains necessary to
-  obtain any driving from them.
-- **Anti-crawl is not innocuous.** It gets AIM moving, but the run goes
-  `off_route`: the protocol trades a stationary ego for one that departs the route
-  it is being scored on. This was invisible before the `off_route` flag existed.
-
-Anti-crawl is therefore reported **per model**, not as a global protocol, and
-route-completion claims for AIM and TransFuser under anti-crawl are not yet
-defensible.
 
 ## Validation: Synthetic Fault Injection Benchmark
 
@@ -230,18 +190,15 @@ Support matrix:
 | --- | --- | --- |
 | InterFuser | supported | supported |
 | NEAT | supported | supported (`red_light_occ`) |
-| TransFuser | supported for closed-loop outcome | hard error: detection head is off the causal path to control |
-| AIM | supported for closed-loop outcome | hard error: no semantic head |
-| TCP | supported for closed-loop outcome | hard error: no semantic head |
-| CILRS | hard error: no planning stage | hard error: no semantic head |
 
-Important caveat: for AIM, TCP, and TransFuser, the controller consumes planning
-waypoints and velocity only. At a fixed pose, restoring planning restores the
-per-tick control by construction; that is arithmetic, not empirical mediation
-evidence. For these models the non-trivial evidence is the closed-loop outcome
-of the intervened run, such as route completion, collisions, and lane
-invasions. The genuinely informative control-level decomposition exists only
-for InterFuser and NEAT, where multiple stage outputs feed the controller.
+Important caveat on control-level evidence: for a single-input controller that
+consumes only planning waypoints and velocity, restoring planning at a fixed pose
+restores the per-tick control by construction — arithmetic, not empirical
+mediation evidence — so the informative evidence there is the closed-loop outcome
+(route completion, collisions, lane invasions). The genuinely informative
+control-level decomposition exists for **multi-input controllers**, i.e. both
+models used here: InterFuser (object-density map + waypoints feed the controller)
+and NEAT (`red_light_occ` + waypoints feed the controller).
 
 #### Confirmed result: the causal chain closes at the outcome level
 
@@ -267,10 +224,10 @@ route. On route 31->36 the *correlational* diagnosis labels the stall "planning"
 but the counterfactual localizes it to "semantic" and the outcome recovery proves
 the counterfactual right — the counterfactual is stable where the correlational
 label is not. Full protocol, numbers, and scope in
-[docs/sd2_outcome_level_result.md](docs/sd2_outcome_level_result.md).
-TransFuser/CILRS full-brake and AIM/TCP crawl under 0.9.10-era checkpoints in
-0.9.16, so they offer no localizable stressor-induced failure; NEAT does, and is
-covered next.
+[docs/sd2_outcome_level_result.md](docs/sd2_outcome_level_result.md). Other
+published E2E checkpoints we tried do not drive under 0.9.10-era weights in
+CARLA 0.9.16 (they full-brake or crawl), so they offer no localizable
+stressor-induced failure to analyze; NEAT does, and is covered next.
 
 #### Confirmed result: NEAT, divergent semantic collapse, and the RUSH probe
 
@@ -489,7 +446,7 @@ logs are Observability Tier 0/1. Clean and stress runs are designed to pair by
 `frame_idx`; severe weather or control noise can still make the closed-loop
 trajectory diverge, so frame pairing is an alignment convention for analysis.
 
-## E2E Model Diagnosis (InterFuser)
+## E2E Model Diagnosis (InterFuser and NEAT)
 
 SD2 can record InterFuser, an E2E camera+lidar model, in CARLA and emit Tier
 2/3 logs with Vision, Semantic, Planning, Control, and Outcome populated. The
@@ -551,226 +508,31 @@ The script logs first-tick sensor shapes, model input tensor shapes, and model
 output shapes before recording frames, which is the first place to look if a
 live CARLA run has an input-shape mismatch.
 
-### TransFuser
+### NEAT (second architecture)
 
-SD2 also records TransFuser as a second E2E architecture for RQ3-style
-cross-architecture failure comparison: clean/stress runs can be collected with
-the same CARLA town, seed, route, frame count, and visual stressor, then
-compared against InterFuser fingerprints using the same SD2 stage schema.
+SD2 records **NEAT** as the second architecture, using the same clean/stress
+pairing and SD2 stage schema:
 
-The recorder is
-[experiments/transfuser_record.py](experiments/transfuser_record.py); the
-CARLA-free conversion module is
-[src/sd2/adapters/transfuser_adapter.py](src/sd2/adapters/transfuser_adapter.py).
-`models/TransFuser/` is expected to be a local gitignored junction to the
-TransFuser checkout. The default checkpoint directory is:
-
-```text
-models/TransFuser/checkpoints/models_2022/transfuser
-```
-
-The script follows the verified TransFuser load recipe: it prepends only
-`models/TransFuser/TransFuser_UI_V2/transfuser/team_code_transfuser`, imports
-`GlobalConfig` and `LidarCenterNet`, reads `args.txt`, loads
-`model_seed1_39.pth`, strips the `module.` DDP prefix, and uses the installed
-standard `timm` package. It does not prepend InterFuser's vendored `timm` path;
-`mmcv` and `torch_scatter` remain optional because the TransFuser model file has
-fallbacks for this inference path.
-
-The recorder attaches the TransFuser sensor rig from the submission agent:
-front/left/right RGB cameras `960x480` fov `120` at yaw `0/-60/+60`, IMU, GNSS,
-a speedometer measurement derived from ego velocity, and lidar `ray_cast` at the
-configured lidar pose for the `transFuser` backbone. Visual stressors are
-applied to the RGB camera frames before TransFuser preprocessing, target-point
-image generation, `forward_ego`, and `control_pid`.
-
-Record a clean TransFuser run:
-
-```powershell
-python experiments/transfuser_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/TransFuser/checkpoints/models_2022/transfuser --stress none --output data/carla/transfuser_town10_clean_seed42.jsonl --spawn-index 0
-```
-
-Record a matched Gaussian-noise stress run with the same seed, town, frame
-count, and spawn index:
-
-```powershell
-python experiments/transfuser_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/TransFuser/checkpoints/models_2022/transfuser --stress gaussian_noise --stress-severity 3 --output data/carla/transfuser_town10_gaussian_noise_s3_seed42.jsonl --spawn-index 0
-```
-
-Analyze the pair:
-
-```powershell
-sd2 analyze --clean data/carla/transfuser_town10_clean_seed42.jsonl --stress data/carla/transfuser_town10_gaussian_noise_s3_seed42.jsonl --config configs/mvp.yaml --output outputs/transfuser_town10_gaussian_noise_s3 --report
-```
-
-Aggregate InterFuser and TransFuser fingerprints for cross-model comparison:
-
-```powershell
-sd2 fingerprint --analysis-dir outputs --output outputs/e2e_fingerprint_summary.md
-```
-
-Stage mapping:
-
-- `vision`: TransFuser fused image/LiDAR backbone embedding before the waypoint
-  GRU as `feature` for `embedding_cosine`, plus three-camera `image_mean` and
-  `image_std` fallback.
-- `semantic`: `rotated_bb` detections from the CenterNet branch, converted to
-  vehicle objects, per-class counts, occupancy/density summary, confidence
-  summary, and optional BEV segmentation summary.
-- `planning`: `pred_wp` waypoints, target-speed proxy from waypoint spacing,
-  route command, local target point, and stuck-state flag.
-- `control`: `LidarCenterNet.control_pid` steer, throttle, and brake after the
-  TransFuser action-repeat/stuck/safety logic.
-- `outcome`: CARLA collision and lane-invasion events, route progress, and
-  optional TTC placeholder.
-
-The TransFuser and InterFuser adapters both emit Vision, Semantic, Planning,
-Control, and Outcome with the same SD2 stage names, so `sd2 analyze` and
-`sd2 fingerprint` can compare the two architectures under matched visual stress.
-
-#### Making TransFuser drive (anti-crawl creep)
-
-Out of the box in open-world closed loop (no leaderboard scenario), TransFuser —
-like the AIM/CILRS/TCP baselines — falls into a **cold-start crawl limit-cycle**:
-from a standstill the model predicts short waypoints, so `control_pid` derives a
-low desired speed and brakes; the ego briefly creeps, overshoots the tiny
-desired speed, brakes hard, and stops again. Route progress stalls near zero and
-the planning/control deviations end up measured on a near-stationary ego.
-
-The `--debug-driving` diagnosis (per-tick `speed`, `is_stuck`, `stuck_detector`,
-`forced_move`, `emergency_stop`, safety-box point count, `target_point`, and the
-first/last predicted waypoint) confirmed the cause on a live run: the LiDAR
-safety brake never fires (`emergency_stop=False`, `safety_pts=0`) and the
-`target_point`/waypoint frames are correct — the ego is simply trapped by its own
-low predicted speed. TransFuser already ships a **creep controller** (it forces
-`default_speed ≈ 4 m/s` while `is_stuck`), but its stuck trigger
-(`stuck_threshold = 1100` frames of near-zero speed) never fires during a crawl.
-
-The recorder exposes the creep so it can engage in the crawl regime:
-
-- `--tf-creep-speed S` — count a frame toward the stuck detector when speed `< S`
-  (default `0.1` = original "only truly stopped"; set `2.5` to treat crawling as
-  stuck). The detector only resets once the ego is clearly moving above `S`.
-- `--tf-stuck-threshold N` — engage the creep after `N` sub-`tf-creep-speed` frames
-  (overrides `config.stuck_threshold`).
-- `--tf-creep-duration N` — how many frames each forced-move creep lasts
-  (overrides `config.creep_duration`).
-- `--debug-driving` / `--no-lidar-safe-check` remain available for diagnosis.
-
-> The "~4 m/s, ~85% of the route" figures previously quoted here came from the
-> broken progress tracker described in the
-> [pipeline audit](docs/recorder_bug_audit.md). Post-fix, TransFuser covers 1.8 m
-> in 300 frames at 0.12 m/s with its default settings — the creep parameters below
-> have not yet been re-tuned against a correct route. Treat them as a starting
-> point, not a validated configuration.
-
-The creep settings are supplied like this:
-
-```powershell
-# clean + gaussian-noise, TransFuser native creep engaged
-python experiments/transfuser_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 120 --warmup 20 --seed 42 --checkpoint models/TransFuser/checkpoints/models_2022/transfuser --stress none --tf-creep-speed 2.5 --tf-stuck-threshold 5 --tf-creep-duration 60 --output data/carla/transfuser_town10_clean_seed42.jsonl --spawn-index 0
-python experiments/transfuser_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 120 --warmup 20 --seed 42 --checkpoint models/TransFuser/checkpoints/models_2022/transfuser --stress gaussian_noise --stress-severity 3 --tf-creep-speed 2.5 --tf-stuck-threshold 5 --tf-creep-duration 60 --output data/carla/transfuser_town10_gaussian_noise_s3_seed42.jsonl --spawn-index 0
-sd2 analyze --clean data/carla/transfuser_town10_clean_seed42.jsonl --stress data/carla/transfuser_town10_gaussian_noise_s3_seed42.jsonl --config configs/mvp.yaml --output outputs/transfuser_town10_gaussian_noise_s3 --report
-```
-
-The creep is TransFuser's own mechanism; `--tf-creep-speed`/`--tf-stuck-threshold`
-only change *when* it engages, not the model's predictions, and are separate from
-the shared `--anti-crawl`/`--creep-*` applied-throttle nudge below. The same cold-start crawl
-affects the AIM/CILRS/TCP camera baselines (NEAT escapes it on its own); those
-recorders instead take a generic `--anti-crawl` flag that nudges the *applied*
-throttle to give the ego a rolling start — see the next section.
-
-If run (2) drives but (1) does not, the LiDAR safety box is the culprit; if
-`emergency_stop=False` throughout but `brake` stays high with sane waypoints,
-the fix is in the target-point/route frame rather than the safety logic.
-
-### Classic TransFuser-CVPR'21 Baselines
-
-SD2 also records three classic baselines from the TransFuser-CVPR'21 codebase
-using the same clean/stress pairing and SD2 stage schema:
-
-- **AIM**: camera-only imitation model; SD2 observes front-image encoder
-  features, predicted waypoints, PID control, and outcome. AIM has no semantic
-  head, so the semantic stage is absent/unobserved.
-- **CILRS**: camera-only conditional imitation model; SD2 observes front-image
-  encoder features, predicted velocity as the planning target-speed signal,
-  direct control, and outcome. CILRS has no semantic head, so the semantic stage
-  is absent/unobserved.
 - **NEAT**: attention-field model; SD2 observes multi-camera encoder features,
   decoded BEV occupancy semantics (`bev_seg_summary`), predicted waypoints, PID
   control, and outcome. The `bev_seg_summary` map is a `decode(...)` side output
-  **off** the control path (like TransFuser's detections); the only NEAT semantic
-  signal that actually feeds `control_pid` is `red_light_occ`, so that — not the
-  BEV map — is what a semantic intervention on NEAT swaps.
-- **TCP**: Bench2Drive trajectory+control dual-branch model; SD2 observes
-  front-image backbone features, `pred_wp` waypoints, final gated control plus
-  raw trajectory/control branch actions, and outcome. TCP is fed a single front
-  camera resized/sized to `256x900` instead of the original three-camera mosaic,
-  and has no semantic head, so the semantic stage is absent/unobserved.
+  **off** the control path; the only NEAT semantic signal that actually feeds
+  `control_pid` is `red_light_occ`, so that — not the BEV map — is what a semantic
+  intervention on NEAT swaps.
 
-`models/AIM/`, `models/CILRS/`, `models/NEAT/`, and `models/TCP/` are expected
-to be local gitignored junctions/checkouts. The default checkpoints are:
+`models/NEAT/` is expected to be a local gitignored junction. Default checkpoints:
 
 ```text
-models/AIM/aim/best_model.pth
-models/CILRS/cilrs/best_model.pth
 models/NEAT/neat/best_encoder.pth
 models/NEAT/neat/best_decoder.pth
 models/NEAT/neat/args.txt
-models/TCP/checkpoints/tcp_b2d.ckpt
 ```
 
-**Anti-crawl (per model, not a global protocol).** Some checkpoints fall into a
-cold-start crawl limit-cycle from a standstill and route progress stalls near
-zero. All six recorders accept a generic `--anti-crawl` flag that gives the ego a
-rolling start by nudging the **applied** throttle in sustained bursts while it
-crawls. The **recorded** control stage still holds the model's raw
-steer/throttle/brake, so the clean-vs-stress control comparison stays a pure model
-measurement; nudged frames are flagged in the recorded control state as
-`anti_crawl_applied`, alongside the `applied_throttle` actually sent to the
-simulator, so the nudge is auditable offline and an ablation can cite exact frame
-counts.
-
-Which models need it was **measured**, not assumed — see
-[the audit](docs/recorder_bug_audit.md#the-cold-start-crawl-is-real-and-anti-crawl-does-not-fix-transfuser).
-With correctly configured sensors, over 300 frames with no nudge: InterFuser drives
-the route at 4.95 m/s and needs nothing. NEAT drives but collides 69 times. AIM
-(0.71 m/s) and TCP (1.09 m/s) crawl. **TransFuser and CILRS command a full brake on
-every frame and never move.**
-
-Anti-crawl is **not innocuous, and it does not rescue a model that will not drive.**
-It gets AIM moving, but the run goes `off_route`, so a "driving" AIM run under
-anti-crawl is not following the route it is scored on. On TransFuser it is worse: with
-`--creep-duration 100` the ego covers *more* of the route than InterFuser while the
-model brakes on **300 of 300 frames** — the nudge overrode the throttle on 243 frames
-and pushed a braking model 93 m. That number describes the protocol, not the model.
-
-**No route-completion figure for AIM, TCP, TransFuser or CILRS is currently
-defensible.** The earlier "~85–90% of the route" claim came from the fabricated route
-tracker and is withdrawn. Use `--anti-crawl` to study a model's *control outputs* under
-stress, never to produce an outcome metric for it.
-
-Flags: `--creep-speed` (crawl threshold m/s), `--creep-frames` (crawl frames before
-a burst), `--creep-throttle` (burst throttle), `--creep-duration` (burst length).
-These shared `--creep-*` flags control the anti-crawl applied-throttle nudge, not
-TransFuser's native `--tf-*` creep overrides described above; the two mechanisms are
-independent and may both be active at once.
-
-Record and analyze AIM (with anti-crawl):
-
-```powershell
-python experiments/aim_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/AIM/aim/best_model.pth --stress none --anti-crawl --creep-speed 2.5 --creep-frames 4 --creep-throttle 0.6 --creep-duration 40 --output data/carla/aim_town10_clean_seed42.jsonl --spawn-index 0
-python experiments/aim_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/AIM/aim/best_model.pth --stress gaussian_noise --stress-severity 3 --output data/carla/aim_town10_gaussian_noise_s3_seed42.jsonl --spawn-index 0
-sd2 analyze --clean data/carla/aim_town10_clean_seed42.jsonl --stress data/carla/aim_town10_gaussian_noise_s3_seed42.jsonl --config configs/mvp.yaml --output outputs/aim_town10_gaussian_noise_s3 --report
-```
-
-Record and analyze CILRS:
-
-```powershell
-python experiments/cilrs_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/CILRS/cilrs/best_model.pth --stress none --output data/carla/cilrs_town10_clean_seed42.jsonl --spawn-index 0
-python experiments/cilrs_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/CILRS/cilrs/best_model.pth --stress gaussian_noise --stress-severity 3 --output data/carla/cilrs_town10_gaussian_noise_s3_seed42.jsonl --spawn-index 0
-sd2 analyze --clean data/carla/cilrs_town10_clean_seed42.jsonl --stress data/carla/cilrs_town10_gaussian_noise_s3_seed42.jsonl --config configs/mvp.yaml --output outputs/cilrs_town10_gaussian_noise_s3 --report
-```
+Over 300 frames with correctly configured sensors and no nudge, NEAT drives (it
+does not fall into the cold-start crawl that afflicts some other checkpoints), and
+its confirmed SD2 results are the contrast→planning and red-light→semantic (RUSH)
+localizations summarized above and in
+[docs/sd2_outcome_level_result.md](docs/sd2_outcome_level_result.md) §10.
 
 Record and analyze NEAT:
 
@@ -780,28 +542,7 @@ python experiments/neat_record.py --host localhost --port 2000 --town Town10HD_O
 sd2 analyze --clean data/carla/neat_town10_clean_seed42.jsonl --stress data/carla/neat_town10_gaussian_noise_s3_seed42.jsonl --config configs/mvp.yaml --output outputs/neat_town10_gaussian_noise_s3 --report
 ```
 
-Record and analyze TCP:
-
-```powershell
-python experiments/tcp_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/TCP/checkpoints/tcp_b2d.ckpt --planner-type only_traj --stress none --output data/carla/tcp_town10_clean_seed42.jsonl --spawn-index 0
-python experiments/tcp_record.py --host localhost --port 2000 --town Town10HD_Opt --frames 300 --warmup 20 --seed 42 --delta 0.05 --checkpoint models/TCP/checkpoints/tcp_b2d.ckpt --planner-type only_traj --stress gaussian_noise --stress-severity 3 --output data/carla/tcp_town10_gaussian_noise_s3_seed42.jsonl --spawn-index 0
-sd2 analyze --clean data/carla/tcp_town10_clean_seed42.jsonl --stress data/carla/tcp_town10_gaussian_noise_s3_seed42.jsonl --config configs/mvp.yaml --output outputs/tcp_town10_gaussian_noise_s3 --report
-```
-
-TCP stage mapping:
-
-- `vision`: mean-pooled TCP ResNet/perception feature as `feature`, plus
-  single-front-camera `image_mean` and `image_std` fallback.
-- `semantic`: absent/unobserved; TCP has no explicit semantic head.
-- `planning`: `pred_wp` future waypoints (`pred_len=4`), control-PID
-  `desired_speed` as `target_speed`, route command, and local target point.
-- `control`: final steer/throttle/brake after TCP planner selection, throttle
-  clamp, and brake gating, with raw trajectory-branch and control-branch
-  steer/throttle/brake preserved in `details`.
-- `outcome`: CARLA collision and lane-invasion events, route progress, and
-  optional TTC placeholder.
-
-Aggregate all E2E fingerprints:
+Aggregate fingerprints across recorded runs:
 
 ```powershell
 sd2 fingerprint --analysis-dir outputs --output outputs/e2e_fingerprint_summary.md
@@ -903,8 +644,8 @@ MVP Phase 1 through the offline stressor layer are complete:
 - optional-stage reasoning metric ablations and paraphrase-robustness probe
   (language-based agents only; unused by the E2E experiments)
 - `experiments/run_fault_benchmark.py` one-command validation demo
-- CARLA InterFuser, TransFuser, AIM, CILRS, NEAT, and TCP E2E recorders plus pure
-  SD2 adapters for stage-wise diagnosis
+- CARLA InterFuser and NEAT E2E recorders plus pure SD2 adapters for stage-wise
+  diagnosis
 - observed-stage and common-stage robustness means (`sd2 fingerprint`) and
   multi-seed statistical robustness (`sd2 aggregate`)
 
