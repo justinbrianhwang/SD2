@@ -340,6 +340,66 @@ necessity+sufficiency 2x2), and NEAT's contrast slowdown to its planning
 waypoints (necessity on two routes, sufficiency on one) -- each validated by a
 closed-loop counterfactual, with no overclaiming where a channel is vacuous.
 
+### 10.2 Noise-induced red-light blindness: a non-vacuous, safety-critical NEAT semantic localization
+
+Section 10.1 could only localize NEAT to planning because its semantic channel
+(`red_light_occ`) was identically zero on empty roads. That channel becomes
+**non-vacuous at a red light**, which yields the sharpest result in this document.
+
+Setup: all Town10HD traffic lights are forced red (external client, held
+throughout). An empirical scan of 31 light-facing spawns finds **6** where clean
+NEAT actually detects the light (`red_light_occ` ~2.6-5.5) and **stops** (spawns
+11, 21, 51, 87, 102, 146); on the rest NEAT either fails to detect the light or
+does not stop -- NEAT's OOD red-light stopping is unreliable in general, and we
+test only the subset where it holds. On those 6 routes, gaussian_noise s5
+**suppresses `red_light_occ` to 0** (NEAT goes blind to the light) and NEAT
+**drives through the red**. Same-pose counterfactual, n=6 seeds/condition (150
+frames, forced red), metric = displacement in metres (here a *low* value is the
+safe outcome and a *high* value is a red-light violation):
+
+| spawn | clean | gn5 (blind) | **semantic-restore** | planning-restore | semantic recovery [95% CI] |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 51 | 0.0 | 4.7 | **0.0** | 2.6 (runs) | 4.7 [4.7, 4.8] |
+| 21 | 0.0 | 5.9 | **0.0** | 5.7 (runs) | 5.9 [5.9, 6.0] |
+| 87 | 0.0 | 24.9 | **0.0** | 25.7 (runs) | 24.9 [24.2, 26.2] |
+| 11 | 0.0 | 24.2 | **0.0** | 0.2 (stops) | 24.2 [23.9, 24.4] |
+| 102 | 0.0 | 25.7 | **0.0** | 0.0 (stops) | 25.7 [25.5, 25.8] |
+| 146 | 0.2 | 33.5 | **0.1** | 33.3 (runs) | 33.4 [32.9, 33.8] |
+
+**Necessity is universal and deterministic (6/6 routes):** restoring only the
+clean `red_light_occ` -- with every other perception channel still corrupted --
+returns NEAT to a full stop at the line (~0 m), eliminating on average **19.8 m**
+of red-light running; every recovery CI excludes zero by a wide margin. This is a
+**non-vacuous** semantic intervention (`red_light_occ` swaps 3.9 -> 0, changing
+control), unlike the empty-road case, and it is **safety-critical** (running vs
+stopping at a red).
+
+**Semantic-specific dissociation on 4/6 routes** (51, 21, 87, 146): restoring the
+planning waypoints instead does *not* stop the car -- only the red-light signal
+does. On 2/6 (11, 102) the failure is **over-determined**: the clean waypoints at
+that pose also encode a stop, so planning-restore stops it too. We report this
+rather than claiming a clean dissociation everywhere.
+
+**The unifying phenomenon (proposed name: "same-stressor semantic divergence").**
+The *same* corruption -- gaussian_noise s5 -- attacks the *semantic-perception
+stage* of both architectures, but because that stage encodes different things it
+diverges into **opposite, each-catastrophic** closed-loop failures: InterFuser
+hallucinates phantom obstacles and **freezes** (Sections 2-9), NEAT goes blind to
+the red light and **runs it** (here). In both, SD2 both localizes the failure to
+the semantic stage and **reverses the safety-critical behaviour by restoring a
+single internal semantic signal** -- object-density for InterFuser,
+`red_light_occ` for NEAT. We call this restoration capability *single-signal
+counterfactual reversal*: a correlational method can see neither the shared cause
+nor the single-signal fix.
+
+**Honesty caveats.** (1) The lights are *forced* red by an external client -- a
+controlled, somewhat artificial elicitation, not natural signal cycling. (2) The
+result holds on the 6/31 spawns where clean NEAT reliably stops at a red;
+NEAT's red-light stopping is otherwise unreliable (it detects but drives through
+on some spawns), which is itself an OOD symptom. (3) Same 0.9.10-in-0.9.16 OOD
+checkpoint caveat as everywhere else. Within those bounds the effect is
+deterministic across 6 seeds and 6 intersections.
+
 ## 11. Reproduce
 
 Stable route + outcome chain (CARLA on Town10HD_Opt, InterFuser checkpoint in
@@ -376,13 +436,14 @@ junction-crossing routes that stall). Verified stable pairs on Town10HD_Opt:
 
 - **Two architectures with closed-loop localizations; InterFuser is the deep
   case.** InterFuser carries the full result (necessity+sufficiency 2x2,
-  dose-response, mechanism, traffic, four-route distribution). NEAT adds a second
-  closed-loop replication (Section 10.1) that localizes to a *different* stage
-  (planning), but it is narrower: single causal arm (its semantic channel is
-  scenario-vacuous), a slowdown rather than a stall, and sufficiency on one of two
-  routes. TransFuser and CILRS command full brake every frame, AIM and TCP crawl
-  — all in 0.9.16 with 0.9.10-era checkpoints (out of distribution), so they
-  provide no localizable stressor-induced failure to analyze.
+  dose-response, mechanism, traffic, four-route distribution). NEAT adds two
+  closed-loop replications that localize to *different* stages than InterFuser:
+  its contrast slowdown to **planning** (Section 10.1) and, at forced red lights,
+  its noise-induced red-light running to the **semantic** `red_light_occ` signal
+  (Section 10.2, necessity on 6/6 routes, deterministic, non-vacuous and
+  safety-critical). TransFuser and CILRS command full brake every frame, AIM and
+  TCP crawl — all in 0.9.16 with 0.9.10-era checkpoints (out of distribution), so
+  they provide no localizable stressor-induced failure to analyze.
 - These are still 0.9.10 checkpoints in 0.9.16. The claim is **not** that
   InterFuser drives 0.9.16 robustly (it does not — most routes stall). The claim
   is that on the routes where it does drive, an effective input stressor
