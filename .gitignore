@@ -23,7 +23,9 @@ outputs/*
 
 # Raw CARLA run recordings (regenerable; results are summarized in the README).
 # Calibration fixtures under data/carla/calib/ stay tracked (not matched here).
+# Both the top level and any subdirectory (e.g. data/carla/sd2_if/, sd2_sweep/).
 data/carla/*.jsonl
+data/carla/**/*.jsonl
 
 # IDE / OS
 .vscode/
@@ -34,7 +36,10 @@ Thumbs.db
 # Local E2E model repos + checkpoints (own licenses, large weights)
 models/
 
-# Recorder sidecars and sweep outputs (data, not results)
+# Recorder sidecars, run logs, and sweep outputs (data, not results)
 data/carla/*.json
+data/carla/**/*.json
 data/carla/*.partial
+data/carla/**/*.partial
+data/carla/**/*.log
 data/carla/sweep/
