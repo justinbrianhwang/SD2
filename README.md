@@ -66,14 +66,16 @@ SD2 diagnoses six published E2E driving models. The model weights and code are
 consumed read-only through gitignored `models/` junctions; nothing in this repo
 redistributes them. Original sources:
 
-| Model | Source repository | Paper (venue) | Sensors | SD2 stages observed |
-| --- | --- | --- | --- | --- |
-| **InterFuser** | [opendilab/InterFuser](https://github.com/opendilab/InterFuser) | Shao et al., CoRL 2022 | camera + LiDAR | vision, **semantic** (object density), planning, control |
-| **TransFuser** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Prakash et al., CVPR 2021 · Chitta et al., TPAMI 2023 | camera + LiDAR | vision, **semantic** (BEV-seg / detections), planning, control |
-| **AIM** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Prakash et al., CVPR 2021 (baseline) | camera | vision, planning, control (no semantic head) |
-| **CILRS** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Codevilla et al., ICCV 2019 (reimpl.) | camera | vision, control (no semantic / waypoints) |
-| **NEAT** | [autonomousvision/neat](https://github.com/autonomousvision/neat) | Chitta et al., ICCV 2021 | multi-camera | vision, **semantic** (BEV occupancy), planning, control |
-| **TCP** | [OpenDriveLab/TCP](https://github.com/OpenDriveLab/TCP) · weights [Thinklab-SJTU/Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo) | Wu et al., NeurIPS 2022 | camera | vision, planning, control (no semantic head) |
+| Model | Source repository | Paper (venue) | Sensors | Stages SD2 records | Semantic on the control path? |
+| --- | --- | --- | --- | --- | --- |
+| **InterFuser** | [opendilab/InterFuser](https://github.com/opendilab/InterFuser) | Shao et al., CoRL 2022 | camera + LiDAR | vision, semantic (object density), planning, control | **Yes** — object-density map feeds the controller (valid semantic intervention) |
+| **TransFuser** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Prakash et al., CVPR 2021 · Chitta et al., TPAMI 2023 | camera + LiDAR | vision, semantic (BEV-seg / detections), planning, control | **No** — detection head is a side output off the control path (semantic intervention is a hard error) |
+| **AIM** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Prakash et al., CVPR 2021 (baseline) | camera | vision, planning, control | No semantic head |
+| **CILRS** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Codevilla et al., ICCV 2019 (reimpl.) | camera | vision, control | No semantic head; no waypoints |
+| **NEAT** | [autonomousvision/neat](https://github.com/autonomousvision/neat) | Chitta et al., ICCV 2021 | multi-camera | vision, semantic (BEV occupancy), planning, control | **Partly** — the recorded BEV-occupancy map is a side output off the path; only `red_light_occ` feeds the controller |
+| **TCP** | [OpenDriveLab/TCP](https://github.com/OpenDriveLab/TCP) · weights [Thinklab-SJTU/Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo) | Wu et al., NeurIPS 2022 | camera | vision, planning, control | No semantic head |
+
+"Stages SD2 records" means SD2 logs a representation at that stage — it does **not** imply that stage lies on the causal path to control. Whether the semantic representation actually feeds the controller (and is therefore a valid intervention target) is the last column, and it matches the intervention support matrix in the "Counterfactual stage intervention" section below. Only InterFuser (object density) and NEAT (`red_light_occ`) expose a semantic signal that reaches control; TransFuser's detections and NEAT's BEV-occupancy map are recorded but off-path.
 
 ## Results: live CARLA robustness diagnosis
 
@@ -652,8 +654,10 @@ using the same clean/stress pairing and SD2 stage schema:
   is absent/unobserved.
 - **NEAT**: attention-field model; SD2 observes multi-camera encoder features,
   decoded BEV occupancy semantics (`bev_seg_summary`), predicted waypoints, PID
-  control, and outcome. NEAT contributes a BEV-seg semantic signal like
-  TransFuser.
+  control, and outcome. The `bev_seg_summary` map is a `decode(...)` side output
+  **off** the control path (like TransFuser's detections); the only NEAT semantic
+  signal that actually feeds `control_pid` is `red_light_occ`, so that — not the
+  BEV map — is what a semantic intervention on NEAT swaps.
 - **TCP**: Bench2Drive trajectory+control dual-branch model; SD2 observes
   front-image backbone features, `pred_wp` waypoints, final gated control plus
   raw trajectory/control branch actions, and outcome. TCP is fed a single front
