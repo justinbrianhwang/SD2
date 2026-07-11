@@ -284,6 +284,62 @@ contribution: SD2 does not merely say "one model failed and one did not" -- it
 localizes to the same stage that is brittle in one architecture and robust in the
 other, and explains the robustness difference mechanistically.
 
+### 10.1 A full closed-loop replication on NEAT: the failure localizes to planning
+
+The robustness above is to the four default stressors. A stronger corruption --
+**contrast_shift s5** (RGB contrast x2.0 around the midpoint), a stressor NEAT was
+not previously exposed to -- does degrade NEAT on two of the four routes: route
+completion drops from ~0.93 to a ~0.68-0.75 floor with mean speed falling from
+~4.6 to ~3.35 m/s (NEAT drives markedly slower and under-completes in the fixed
+300-frame budget; no collisions). This gives a NEAT failure to localize, so we
+ran the **same closed-loop restore/inject counterfactual** used for InterFuser
+(routes 31->36 and 33->36, n=6 seeds per condition, back-to-back):
+
+| route | clean | contrast none | **planning-restore** | planning-inject |
+| --- | ---: | ---: | ---: | ---: |
+| 31 -> 36 | 0.928 | 0.813 (4/6 degraded) | **0.941** | 0.751 |
+| 33 -> 36 | 0.934 | 0.795 (3/6 degraded) | **0.939** | 0.901 |
+
+Bootstrap 95% CI (20,000 resamples):
+
+| route | planning-restore recovery [95% CI] | planning-inject degradation [95% CI] |
+| --- | --- | --- |
+| 31 -> 36 | **+0.128 [0.059, 0.195]** | **+0.177 [0.169, 0.183]** |
+| 33 -> 36 | **+0.144 [0.043, 0.233]** | +0.032 [-0.015, 0.122] |
+
+**Necessity holds on both routes:** restoring the clean planning waypoints
+recovers NEAT to clean-level completion (all 12 restore runs land at 0.93-0.95;
+the recovery CI excludes zero on both routes). **Sufficiency holds on route
+31->36** (breaking only the waypoints reproduces the degradation, CI
+[0.169, 0.183]) but is **not established on 33->36** (the stochastic degradation
+basin triggered on only 1/6 inject runs, CI includes zero). The contrast
+degradation localizes to NEAT's **planning (waypoint) stage** -- a *different*
+stage than InterFuser's semantic stall.
+
+**Two honesty caveats, stated plainly:**
+
+1. **NEAT's semantic arm is scenario-vacuous here, so this is not a symmetric
+   2x2.** SD2's NEAT "semantic" intervention swaps `red_light_occ` (the only
+   NEAT semantic signal on the causal path to `control_pid`; the BEV-occupancy
+   map SD2 records is a `decode(...)` side output, off-path). On these routes
+   `red_light_occ` is identically 0 on all 300 frames, so the semantic swap
+   changes control on **0/300 frames** and cannot matter -- an empty
+   counterfactual, not evidence that "semantic is not necessary". By contrast the
+   planning swap changes control on **93/300 frames**, confirming the planning arm
+   is genuinely on the causal path. We therefore claim only a planning
+   localization for NEAT, not a semantic dissociation.
+2. **The NEAT degradation is a slowdown, not a stall.** It is a real, cleanly
+   localizable behavioral change (~27% speed loss, cleanly recovered by
+   planning-restore), but weaker than InterFuser's total 0.999 -> 0.000 stall, and
+   its onset is stochastic (bites 3-4 of 6 seeds).
+
+The honest cross-architecture statement is thus: SD2 localizes **distinct
+failures in two architectures to their respective correct internal stages** --
+InterFuser's gaussian-noise stall to its semantic object-density map (full
+necessity+sufficiency 2x2), and NEAT's contrast slowdown to its planning
+waypoints (necessity on two routes, sufficiency on one) -- each validated by a
+closed-loop counterfactual, with no overclaiming where a channel is vacuous.
+
 ## 11. Reproduce
 
 Stable route + outcome chain (CARLA on Town10HD_Opt, InterFuser checkpoint in
@@ -318,9 +374,15 @@ junction-crossing routes that stall). Verified stable pairs on Town10HD_Opt:
 
 ## 12. Scope and honesty
 
-- **InterFuser only.** TransFuser and CILRS command full brake every frame,
-  AIM and TCP crawl, NEAT collides — all in 0.9.16 with 0.9.10-era checkpoints
-  (out of distribution). Unchanged.
+- **Two architectures with closed-loop localizations; InterFuser is the deep
+  case.** InterFuser carries the full result (necessity+sufficiency 2x2,
+  dose-response, mechanism, traffic, four-route distribution). NEAT adds a second
+  closed-loop replication (Section 10.1) that localizes to a *different* stage
+  (planning), but it is narrower: single causal arm (its semantic channel is
+  scenario-vacuous), a slowdown rather than a stall, and sufficiency on one of two
+  routes. TransFuser and CILRS command full brake every frame, AIM and TCP crawl
+  — all in 0.9.16 with 0.9.10-era checkpoints (out of distribution), so they
+  provide no localizable stressor-induced failure to analyze.
 - These are still 0.9.10 checkpoints in 0.9.16. The claim is **not** that
   InterFuser drives 0.9.16 robustly (it does not — most routes stall). The claim
   is that on the routes where it does drive, an effective input stressor
@@ -328,6 +390,11 @@ junction-crossing routes that stall). Verified stable pairs on Town10HD_Opt:
   that stall to the semantic stage and confirms the localization at the
   route-completion level, on two independent routes and across three analysis
   levels (control, behavioral, outcome).
+- **Where a channel is vacuous, we say so rather than presenting a null as
+  evidence.** NEAT's semantic intervention swaps a signal (`red_light_occ`) that
+  is identically zero on the tested routes (0/300 control-frame effect), so its
+  null recovery is structural, not empirical; we claim only the planning arm,
+  which changes control on 93/300 frames.
 - Every number here is read from a JSON/JSONL artifact under
-  `data/carla/sd2_outcome_s31_d36/` and `.../sd2_outcome_s53_d107/`, produced
-  with CARLA restarted before each run.
+  `data/carla/sd2_outcome_s*/` and `.../sd2_neat_contrast_s*/`, produced with the
+  restart-each or back-to-back protocol noted per section.

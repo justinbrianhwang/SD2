@@ -96,6 +96,19 @@ def test_visual_stressors_preserve_bounds_shape_and_input(stress_type: str) -> N
     assert np.array_equal(image, original)
 
 
+@pytest.mark.parametrize(
+    "stress_type", ["contrast_shift", "jpeg_compression", "low_light"]
+)
+def test_new_cli_visual_stressors_produce_valid_images(stress_type: str) -> None:
+    stressor = build_stressor(stress_type)
+    image = _synthetic_image()
+
+    output = stressor.apply_image(image, 5, np.random.default_rng(123))
+
+    assert output.shape == image.shape
+    assert output.dtype == np.uint8
+
+
 def test_sequence_stressors_are_deterministic_for_same_seed() -> None:
     frames = _frames(12)
     for stress_type in ["frame_drop", "frame_delay", "camera_blackout", "low_fps"]:

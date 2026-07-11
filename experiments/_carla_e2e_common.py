@@ -29,7 +29,16 @@ CARLA_PYTHON_API = (
     REPO_ROOT / "external" / "Carla" / "CARLA_0.9.16" / "PythonAPI" / "carla"
 )
 DEFAULT_TARGET_SPEED_KMH = 25.0
-STRESS_CHOICES = ["none", "gaussian_noise", "motion_blur", "brightness", "fog"]
+STRESS_CHOICES = [
+    "none",
+    "gaussian_noise",
+    "motion_blur",
+    "brightness",
+    "fog",
+    "contrast_shift",
+    "jpeg_compression",
+    "low_light",
+]
 INTERVENTION_STAGE_CHOICES = ("none", "planning", "semantic")
 INTERVENTION_DIRECTION_CHOICES = ("restore", "inject")
 INTERVENTION_SUPPORT: dict[str, set[str]] = {
