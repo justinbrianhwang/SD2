@@ -178,7 +178,32 @@ brightness and fog do not meaningfully degrade InterFuser here (completion stays
 dissociation is what a purely correlational method cannot produce: SD2 tells you
 not just that the model failed, but which internal stage each corruption breaks.
 
-## 9. Reproduce
+## 9. Ecological validity: the result holds with real traffic
+
+Sections 2-8 are on empty roads, where the only objects are the noise-induced
+phantoms. To check the semantic localization is not an artifact of an empty scene,
+route 31->36 was rerun with **60 vehicles + 40 walkers**, raising the mean
+detected-object density to ~1.9/frame (up from ~0.4 on the empty road) -- above
+SD2's 1.0 semantic-evidence gate. Clean/stress/restore x3 seeds, restart-each.
+
+| condition (60veh/40walk) | route completion | obj density |
+| --- | ---: | ---: |
+| clean | 0.842 +/- 0.186 | 1.85 |
+| gaussian_noise s5 | 0.037 +/- 0.041 | 2.24 |
+| + **semantic-restore** | **0.817 +/- 0.163** | 0.70 |
+| + planning-restore | 0.010 +/- 0.018 | 2.27 |
+
+Real traffic makes the clean run noisier -- InterFuser legitimately slows and
+stops behind vehicles, so clean completion varies 0.64-1.00 -- but the
+dissociation holds: gaussian_noise s5 still causes a near-total stall (0.037)
+**with real objects in view**, semantic-restore recovers it to the clean-traffic
+level (0.817, **97% of the degradation**, ~4x the clean noise floor), and
+planning-restore does not (0.010). The semantic localization is a property of the
+model's response to the corruption, not an artifact of an empty road; and because
+the object density clears the 1.0 gate, the correlational semantic evidence is now
+sufficient too.
+
+## 10. Reproduce
 
 Stable route + outcome chain (CARLA on Town10HD_Opt, InterFuser checkpoint in
 `INTERFUSER_CKPT`), one condition shown; restart CARLA before each run:
@@ -210,7 +235,7 @@ route's initial heading (the default destination = `spawn + count//2` gives long
 junction-crossing routes that stall). Verified stable pairs on Town10HD_Opt:
 `31->36`, `33->36`, `53->107`, `114->51`.
 
-## 10. Scope and honesty
+## 11. Scope and honesty
 
 - **InterFuser only.** TransFuser and CILRS command full brake every frame,
   AIM and TCP crawl, NEAT collides — all in 0.9.16 with 0.9.10-era checkpoints
