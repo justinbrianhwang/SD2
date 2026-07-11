@@ -55,6 +55,12 @@ the *same* stress and reveal that they fail at *different* stages.
 > recordings invalidated by the [pipeline audit](docs/recorder_bug_audit.md) and
 > have been withdrawn.** The figure below illustrates the comparison SD2 is
 > designed to make; it is not current evidence.
+>
+> A **new, valid** cross-architecture result has since been established on
+> re-recorded runs: InterFuser and NEAT fail at *different* stages under the same
+> corruption ("divergent semantic collapse"), including the safety-critical
+> **RUSH probe** red-light result. See "Confirmed result: NEAT, divergent
+> semantic collapse, and the RUSH probe" below.
 
 ![Cross-architecture failure comparison: semantic-stage vs feature-stage collapse](assets/images/fig4_cross_model.png)
 
@@ -261,9 +267,47 @@ route. On route 31->36 the *correlational* diagnosis labels the stall "planning"
 but the counterfactual localizes it to "semantic" and the outcome recovery proves
 the counterfactual right — the counterfactual is stable where the correlational
 label is not. Full protocol, numbers, and scope in
-[docs/sd2_outcome_level_result.md](docs/sd2_outcome_level_result.md). This is
-InterFuser only; TransFuser/CILRS full-brake, AIM/TCP crawl, and NEAT collides
-under 0.9.10-era checkpoints in 0.9.16.
+[docs/sd2_outcome_level_result.md](docs/sd2_outcome_level_result.md).
+TransFuser/CILRS full-brake and AIM/TCP crawl under 0.9.10-era checkpoints in
+0.9.16, so they offer no localizable stressor-induced failure; NEAT does, and is
+covered next.
+
+#### Confirmed result: NEAT, divergent semantic collapse, and the RUSH probe
+
+The same counterfactual, run on NEAT (a different architecture), localizes NEAT's
+failures to **different stages** than InterFuser — and yields the sharpest,
+safety-critical result in the study.
+
+- **Contrast slowdown → planning.** A contrast_shift s5 corruption slows NEAT
+  (~0.93 → ~0.68-0.75 route completion on two routes); restoring the clean
+  planning waypoints recovers it (necessity on both routes, bootstrap CIs exclude
+  zero), while its semantic channel is scenario-vacuous on empty roads.
+- **Noise-induced red-light blindness → semantic (`red_light_occ`).** At forced
+  red lights, gaussian_noise s5 suppresses NEAT's internal red-light signal
+  `red_light_occ` from ~3.9 to 0; NEAT then **drives through the red** (4.7-33 m,
+  deterministic across 6 seeds on 6 intersections). Restoring *only* that one
+  clean signal — every other perception channel still corrupted — returns NEAT to
+  a full stop at the line on **6/6 routes** (mean 19.8 m of running eliminated,
+  bootstrap 95% CIs far from zero); restoring the planning waypoints instead does
+  not, on 4/6 routes.
+
+| condition (forced-red route, disp in m; low = safe stop) | spawn 146 | spawn 21 |
+| --- | ---: | ---: |
+| clean | 0.2 (stop) | 0.0 (stop) |
+| gaussian_noise s5 (blind) | 33.5 (runs red) | 5.9 (runs red) |
+| + **`red_light_occ`-restore** | **0.1 (stops)** | **0.0 (stops)** |
+| + planning-restore | 33.3 (runs) | 5.7 (runs) |
+
+This is **divergent semantic collapse**: the *same* corruption attacks the
+semantic-perception stage of both models but diverges into opposite catastrophic
+behaviours — InterFuser freezes (phantom obstacles), NEAT runs reds (blindness) —
+each **reversible by restoring one internal semantic signal**. We call that
+diagnostic the **RUSH probe** (Restore-a-Unit-Semantic-signal). Honest scope: the
+lights are *forced* red (controlled, not natural cycling); the red-light result
+holds on the 6 of 31 spawns where clean NEAT reliably stops at all (NEAT's OOD
+red-light stopping is otherwise unreliable); same 0.9.10-in-0.9.16 checkpoint
+caveat throughout. Details, CIs, and the naming note are in
+[docs/sd2_outcome_level_result.md](docs/sd2_outcome_level_result.md) §10.
 
 ### Hard Benchmark Tier
 
