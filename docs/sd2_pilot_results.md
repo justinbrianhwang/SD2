@@ -84,9 +84,43 @@ holds at the **control level** (96.6 % share, brake 0.72 → 0.00) and the **beh
 (0.000 → 0.101, 0 → 123 moving frames); it does **not** yet hold at the **route-completion level**,
 because this marginal route's variability swamps it.
 
-The next step is to find a spawn/route where InterFuser drives stably (small clean variance) and
-repeat the gaussian_noise s5 semantic intervention there. If completion-level recovery then clears
-the noise floor, the full chain — stress → semantic corruption → stall → semantic-restore → recovery
-— is established end to end. Until then, the defensible result is: *the counterfactual localizes the
-stall to the semantic stage at the control and behavioral levels, and reports outcome recovery as
-unmeasurable against the route's own noise, rather than overclaiming it.*
+The next step was to find a spawn/route where InterFuser drives stably (small clean variance) and
+repeat the gaussian_noise s5 semantic intervention there, so completion-level recovery could clear a
+smaller noise floor.
+
+## There is no stable route — InterFuser only drives at spawn 0, and marginally
+
+Eight spawn points across Town10HD_Opt were scanned, each run twice with an identical clean command:
+
+| spawn | rep 1 (route / speed) | rep 2 | verdict |
+| --- | --- | --- | --- |
+| 0 | 0.246 / 4.9 | 0.132 / 2.7 | drives, but marginal (bimodal) |
+| 20 | 0.000 / 0.3 | 0.000 / 0.3 | stalls |
+| 40 | 0.004 / 0.0 | 0.004 / 0.0 | stalls |
+| 60 | 0.005 / 0.1 | 0.005 / 0.1 | stalls |
+| 80 | 0.000 / 1.3 | 0.000 / 0.2 | stalls |
+| 100 | 0.000 / 0.0 | 0.000 / 0.0 | stalls |
+| 120 | 0.000 / 0.0 | 0.000 / 0.0 | stalls |
+| 140 | 0.000 / 0.0 | 0.000 / 0.0 | stalls |
+
+**Seven of eight spawns stall; only spawn 0 drives, and it is the marginal, bimodal route.** There
+is no low-variance route to move the analysis onto. InterFuser is not robustly driving Town10HD_Opt
+in 0.9.16 — it happens to drive from spawn 0 and stalls almost everywhere else, the same
+0.9.10-checkpoint-in-0.9.16 out-of-distribution limit that stops TransFuser and CILRS outright, just
+less total.
+
+## Consequence: outcome-level confirmation is not available under 0.9.16
+
+Because the only route InterFuser drives is marginal, and every other route stalls at ~0 (where a
+stressor has nothing left to degrade), there is no route on which a completion-level recovery can be
+measured above its own noise. This is a property of running 0.9.10-era checkpoints in 0.9.16, not of
+SD2 or the recorder.
+
+**The defensible result stands at the control and behavioral levels:** under an effective stressor
+(gaussian_noise s5), the counterfactual localizes InterFuser's stall to the semantic stage
+(96.6 % control-change share; semantic-restore revives driving 0.000 → 0.101 while planning-restore
+does nothing), and honestly reports outcome recovery as unmeasurable against the route's noise rather
+than overclaiming it. A completion-level confirmation of the full chain would require either a CARLA
+0.9.10 environment (the version these checkpoints were trained and evaluated on) or checkpoints
+retrained for 0.9.16 — both out of scope for the recorder work, and a decision for the project, not
+a fix.
