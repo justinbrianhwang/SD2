@@ -22,6 +22,7 @@ from statistics import mean
 from typing import Any
 
 from sd2.analysis.deviation import DeviationTable
+from sd2.analysis.event_counting import _event_start_indices
 from sd2.analysis.propagation import (
     CollapsePoint,
     DownstreamIncreaseEvidence,
@@ -314,39 +315,45 @@ def _analyze_driving_failure(
             },
         )
 
-    for paired_frame in paired_run.pairs:
-        stress_outcome = _outcome_state(paired_frame.stress.states.get(Stage.OUTCOME))
-        if stress_outcome.get("collision") is True:
-            failure_events.append(
-                {
-                    "type": "collision",
-                    "frame_idx": paired_frame.frame_idx,
-                    "timestamp": paired_frame.timestamp,
-                    "message": (
-                        "Collision occurred in stress run at "
-                        f"t={_format_time(paired_frame.timestamp)} "
-                        f"(frame {paired_frame.frame_idx})."
-                    ),
-                }
-            )
-            break
+    stress_outcomes = [
+        _outcome_state(paired_frame.stress.states.get(Stage.OUTCOME))
+        for paired_frame in paired_run.pairs
+    ]
+    collision_flags = [
+        outcome.get("collision") is True for outcome in stress_outcomes
+    ]
+    for event_start in _event_start_indices(collision_flags):
+        paired_frame = paired_run.pairs[event_start]
+        failure_events.append(
+            {
+                "type": "collision",
+                "frame_idx": paired_frame.frame_idx,
+                "timestamp": paired_frame.timestamp,
+                "message": (
+                    "Collision occurred in stress run at "
+                    f"t={_format_time(paired_frame.timestamp)} "
+                    f"(frame {paired_frame.frame_idx})."
+                ),
+            }
+        )
 
-    for paired_frame in paired_run.pairs:
-        stress_outcome = _outcome_state(paired_frame.stress.states.get(Stage.OUTCOME))
-        if stress_outcome.get("lane_invasion") is True:
-            failure_events.append(
-                {
-                    "type": "lane_invasion",
-                    "frame_idx": paired_frame.frame_idx,
-                    "timestamp": paired_frame.timestamp,
-                    "message": (
-                        "Lane invasion occurred in stress run at "
-                        f"t={_format_time(paired_frame.timestamp)} "
-                        f"(frame {paired_frame.frame_idx})."
-                    ),
-                }
-            )
-            break
+    lane_invasion_flags = [
+        outcome.get("lane_invasion") is True for outcome in stress_outcomes
+    ]
+    for event_start in _event_start_indices(lane_invasion_flags):
+        paired_frame = paired_run.pairs[event_start]
+        failure_events.append(
+            {
+                "type": "lane_invasion",
+                "frame_idx": paired_frame.frame_idx,
+                "timestamp": paired_frame.timestamp,
+                "message": (
+                    "Lane invasion occurred in stress run at "
+                    f"t={_format_time(paired_frame.timestamp)} "
+                    f"(frame {paired_frame.frame_idx})."
+                ),
+            }
+        )
 
     final_pair = paired_run.pairs[-1]
     clean_final = _outcome_state(final_pair.clean.states.get(Stage.OUTCOME))

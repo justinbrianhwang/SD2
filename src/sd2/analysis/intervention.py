@@ -21,6 +21,7 @@ from typing import Any, Mapping
 from sd2.adapters.jsonl_adapter import load_run_jsonl
 from sd2.analysis.diagnosis import compute_failure_diagnosis
 from sd2.analysis.deviation import compute_deviation_table
+from sd2.analysis.event_counting import _count_events
 from sd2.analysis.propagation import compute_propagation_analysis
 from sd2.analysis.thresholds import resolve_threshold_set
 from sd2.core.config import load_config
@@ -205,24 +206,26 @@ def _validate_clean_replicates(reference: RunLog, replicates: list[RunLog]) -> N
 def _outcome_summary(run: RunLog) -> dict[str, Any]:
     final_outcome = _state_dict(run.frames[-1], Stage.OUTCOME) if run.frames else {}
     route_completion = _optional_float(final_outcome.get("route_progress"))
-    collisions = sum(
-        1
+    collision_flags = [
+        _state_dict(frame, Stage.OUTCOME).get("collision") is True
         for frame in run.frames
-        if _state_dict(frame, Stage.OUTCOME).get("collision") is True
-    )
-    lane_invasions = sum(
-        1
+    ]
+    lane_invasion_flags = [
+        _state_dict(frame, Stage.OUTCOME).get("lane_invasion") is True
         for frame in run.frames
-        if _state_dict(frame, Stage.OUTCOME).get("lane_invasion") is True
-    )
+    ]
+    collision_frames = sum(1 for flag in collision_flags if flag)
+    lane_invasion_frames = sum(1 for flag in lane_invasion_flags if flag)
     return {
         "run_id": run.metadata.run_id,
         "condition": run.metadata.condition,
         "route_completion": route_completion,
-        "collision_count": collisions,
-        "collision_any": collisions > 0,
-        "lane_invasion_count": lane_invasions,
-        "lane_invasion_any": lane_invasions > 0,
+        "collision_count": _count_events(collision_flags),
+        "collision_frames": collision_frames,
+        "collision_any": collision_frames > 0,
+        "lane_invasion_count": _count_events(lane_invasion_flags),
+        "lane_invasion_frames": lane_invasion_frames,
+        "lane_invasion_any": lane_invasion_frames > 0,
     }
 
 
