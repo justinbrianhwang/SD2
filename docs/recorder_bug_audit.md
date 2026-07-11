@@ -509,3 +509,14 @@ Town10 mismatch. The residual cause is a model–environment limit: a 0.9.10-era
 in 0.9.16, in a window shorter than its creep gate. That is a property of the evaluation setup, not
 a recorder defect, and no pipeline fix changes it. It is recorded here so the LiDAR-sign fix is not
 mistaken for a fix to the stall.
+
+### InterFuser drives on its own prediction, not on a creep
+
+The same scrutiny was applied to InterFuser, since it too has a forced-forward controller
+(`forced_forward_steps = 12`, armed when `stop_steps` accumulates) that could mask a stationary
+model. It does not. Over the 300-frame run, InterFuser's own predicted trajectory points a steady
+~12 m ahead every frame (`|last waypoint|` = 12.2 at frame 0, 12.7 at 150, 12.6 at 299; min 9.97),
+`target_speed` averages 4.92 m/s, the model brakes on only 5 of 300 frames, and `stop_steps` never
+accumulates enough to arm the forced-forward. The 4.95 m/s it drives is the model's, not the
+controller's. InterFuser's live results are therefore usable; TransFuser's and CILRS's are not,
+for the reason above.
