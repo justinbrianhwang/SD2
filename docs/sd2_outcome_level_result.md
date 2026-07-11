@@ -73,7 +73,61 @@ revives the totally-stalled ego to near-complete route completion; restoring the
 clean planning waypoints does essentially nothing. The recovery is three orders
 of magnitude above the clean noise floor.
 
-## 3. The same result across levels (SD2's own pipeline)
+## 3. Necessity AND sufficiency (the 2x2)
+
+Restore (fix one stage, keep the rest stressed) tests necessity; inject (break
+one stage, keep the rest clean) tests sufficiency. Route 31->36, gaussian_noise
+s5, x3 seeds each:
+
+| stage | inject (break only this) | restore (fix only this) |
+| --- | ---: | ---: |
+| **semantic** | 0.010 (stalls) -> **sufficient** | 0.978 (recovers) -> **necessary** |
+| planning | 0.977 (drives) -> not sufficient | 0.000 (stalls) -> not necessary |
+
+Corrupting the semantic stage alone reproduces the total stall; restoring it
+alone recovers driving. Corrupting or restoring planning does neither. Semantic
+is both necessary and sufficient for the failure; planning is neither. This is a
+complete causal identification, not a correlation.
+
+## 4. Dose-response: recovery scales with severity
+
+gaussian_noise s1..s5, x{none, semantic-restore, planning-restore} x2 seeds,
+route 31->36 (clean 0.999):
+
+| severity | none | semantic-restore | planning-restore | degradation | semantic recovery | planning recovery |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.999 | 0.999 | 0.999 | 0.000 | 0.000 | 0.000 |
+| 2 | 0.999 | 0.999 | 0.999 | 0.000 | 0.000 | 0.000 |
+| 3 | 0.196 | 0.996 | 0.197 | 0.803 | **0.801** | 0.001 |
+| 4 | 0.085 | 0.998 | 0.062 | 0.914 | **0.913** | -0.023 |
+| 5 | 0.000 | 0.974 | 0.000 | 0.999 | **0.974** | 0.000 |
+
+Below the threshold (s1-s2) nothing degrades. Once it bites (s3-s5) the
+degradation rises monotonically, and **semantic-restore recovers almost all of it
+at every severity** (0.80 -> 0.91 -> 0.97) while **planning-restore recovers ~0
+throughout**. The semantic localization is not a single-severity artifact; it is
+graded across the whole dynamic range.
+
+## 5. Mechanism: which control channel, and when
+
+From the same-pose dual-forward logged on a gn_s5 stress run (offline, no CARLA),
+the per-control-channel effect of each stage (mean |Δ| vs the clean forward):
+
+| channel | semantic effect | planning effect |
+| --- | ---: | ---: |
+| steer | 0.000 | 0.000 |
+| throttle | 0.550 | 0.000 |
+| **brake** | **0.733** | 0.000 |
+
+The corrupted semantic map drives the **brake** (and throttle) channel, not
+steering; planning has zero effect on any channel. The stressed forward commands
+brake>0.5 on 222/300 frames starting at frame 0, while the clean forward and the
+semantic-restored control brake on **0/300**. The mechanism is concrete: noise
+corrupts InterFuser's object-density map, the controller reads phantom obstacles,
+and it slams the brake -- restoring the clean semantic map removes the phantom
+braking entirely.
+
+## 6. The same result across levels (SD2's own pipeline)
 
 Run through `sd2 intervention` (official analysis), route 31 -> 36:
 
@@ -86,7 +140,7 @@ Run through `sd2 intervention` (official analysis), route 31 -> 36:
 Route 53 -> 107: semantic control share ~1.0 (planning 0.000); semantic-restore
 outcome recovery **0.991**.
 
-## 4. Counterfactual beats correlational (the methodological contribution)
+## 7. Counterfactual beats correlational (the methodological contribution)
 
 The correlational diagnosis (SD2's `diagnosis.json`) is **route-dependent**:
 
@@ -102,7 +156,7 @@ routes** and *proves* the localization by recovering the closed-loop outcome
 stable where the correlational label is not, and it is validated at the outcome
 level. This is the core methodological claim of SD2.
 
-## 5. Multi-stressor breadth: different corruptions localize to different stages
+## 8. Multi-stressor breadth: different corruptions localize to different stages
 
 Same route (31 -> 36), same protocol, all four visual corruptions at severity 5,
 each intervention x2 seeds. Clean baseline 0.9990, noise floor 0.0005.
@@ -124,7 +178,7 @@ brightness and fog do not meaningfully degrade InterFuser here (completion stays
 dissociation is what a purely correlational method cannot produce: SD2 tells you
 not just that the model failed, but which internal stage each corruption breaks.
 
-## 6. Reproduce
+## 9. Reproduce
 
 Stable route + outcome chain (CARLA on Town10HD_Opt, InterFuser checkpoint in
 `INTERFUSER_CKPT`), one condition shown; restart CARLA before each run:
@@ -156,7 +210,7 @@ route's initial heading (the default destination = `spawn + count//2` gives long
 junction-crossing routes that stall). Verified stable pairs on Town10HD_Opt:
 `31->36`, `33->36`, `53->107`, `114->51`.
 
-## 7. Scope and honesty
+## 10. Scope and honesty
 
 - **InterFuser only.** TransFuser and CILRS command full brake every frame,
   AIM and TCP crawl, NEAT collides — all in 0.9.16 with 0.9.10-era checkpoints
