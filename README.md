@@ -69,8 +69,8 @@ redistributes them. Original sources:
 | Model | Source repository | Paper (venue) | Sensors | SD2 stages observed |
 | --- | --- | --- | --- | --- |
 | **InterFuser** | [opendilab/InterFuser](https://github.com/opendilab/InterFuser) | Shao et al., CoRL 2022 | camera + LiDAR | vision, **semantic** (object density), planning, control |
-| **TransFuser** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Chitta et al., CVPR 2021 / TPAMI 2023 | camera + LiDAR | vision, **semantic** (BEV-seg / detections), planning, control |
-| **AIM** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Chitta et al., CVPR 2021 (baseline) | camera | vision, planning, control (no semantic head) |
+| **TransFuser** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Prakash et al., CVPR 2021 · Chitta et al., TPAMI 2023 | camera + LiDAR | vision, **semantic** (BEV-seg / detections), planning, control |
+| **AIM** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Prakash et al., CVPR 2021 (baseline) | camera | vision, planning, control (no semantic head) |
 | **CILRS** | [autonomousvision/transfuser](https://github.com/autonomousvision/transfuser) | Codevilla et al., ICCV 2019 (reimpl.) | camera | vision, control (no semantic / waypoints) |
 | **NEAT** | [autonomousvision/neat](https://github.com/autonomousvision/neat) | Chitta et al., ICCV 2021 | multi-camera | vision, **semantic** (BEV occupancy), planning, control |
 | **TCP** | [OpenDriveLab/TCP](https://github.com/OpenDriveLab/TCP) · weights [Thinklab-SJTU/Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo) | Wu et al., NeurIPS 2022 | camera | vision, planning, control (no semantic head) |
