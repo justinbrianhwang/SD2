@@ -5,7 +5,9 @@ pipeline. Two of them silently corrupted the driving itself and the metric used 
 Verifying *those* fixes surfaced five more, of a different kind: command-line flags that were
 accepted and then silently ignored. Diagnosing why TransFuser would not drive surfaced three more,
 the worst of the lot: the sensors were never configured, so every model was fed a 2x zoomed camera
-and a 25x sparser LiDAR than its checkpoint expects. Seventeen in total, all listed below.
+and a 25x sparser LiDAR than its checkpoint expects. Pushing that diagnosis further found an
+eighteenth — a LiDAR y-sign bug that emptied TransFuser's BEV — and, past it, a model–environment
+limit no recorder fix resolves. Eighteen defects in total, all listed below.
 
 Each round of verification found the next round's bugs. The recurring cause is a silent fallback —
 `has_attribute` skipping a misspelled key, `getattr(args, ..., default)` swallowing a missing flag,
@@ -468,6 +470,42 @@ number rather than the model's.
 InterFuser drives. NEAT drives but collides 69 times in 15 seconds. AIM and TCP crawl. TransFuser
 and CILRS output a full brake on every frame and do not move at all. Any outcome-based comparison
 across this set would currently be a comparison of how hard the evaluation protocol pushed each
-model, not of the models. The next step is `action_repeat`: the reference agents decide at 10 Hz and
-reuse the previous control on alternate frames, while our recorders run the network every frame at
-20 Hz.
+model, not of the models.
+
+---
+
+## Why TransFuser will not drive — a LiDAR sign bug, then a deeper limit
+
+TransFuser's dead stop was traced input by input, by dumping the exact tensors the model receives.
+
+The camera panorama is a clean, correctly framed road. The **LiDAR BEV was almost empty**: 21 of
+256×256×2 cells occupied, out of 16159 raw points. TransFuser reads a near-empty occupancy grid as
+"boxed in" and predicts a stationary trajectory, so `control_pid` brakes every frame.
+
+The cause is a coordinate-sign bug of the same family as the mirrored GNSS (§1). `lidar_to_histogram_features`
+splats points into a window `x∈[-16,16], y∈[-32,0]`, i.e. forward is −y. CARLA 0.9.16's ray-cast
+LiDAR already reports forward as −y (raw y in `[-83, 0]`). TransFuser, written for 0.9.10 whose LiDAR
+reported forward as +y, negates y (`lidar[:, 1] *= -1`) to land points in that window. Under 0.9.16
+the negation pushes every forward point to +y, **outside** the window: measured, 26 of 16159 points
+survive instead of 11600. Dropping the negation restores the BEV to **7381 occupied cells** and a
+top-down scatter shows the road correctly ahead. The same negation was in `_safety_box` and the
+(unused) point-pillars branch; all three are fixed.
+
+**This is a real bug, and fixing it is necessary — but it is not sufficient.** With the BEV restored,
+the emergency brake disabled, and a prototype `action_repeat` (the LiDAR sweeps only 180° per frame,
+so odd frames carry a rear-half BEV — the reference agent reuses the previous control on those),
+TransFuser **still brakes on every frame** and does not move.
+
+What the tensors then show is that the model is not broken: it predicts a *different* trajectory in
+Town01 (first waypoint 1.66 m ahead) than in Town10HD (0.02 m), so it is reading its inputs. It is
+simply extremely conservative from a standstill. TransFuser is designed this way: it holds station
+until its own creep controller fires, and that controller is gated on `stuck_threshold =
+1100/action_repeat = 550` processed frames — about **55 seconds**. Leaderboard episodes run for
+minutes, so the creep eventually engages; a 300-frame (15 s) recording ends long before it can.
+Forcing the creep early gets motion but no steering, hence the 12–22 collisions in the sweep above.
+
+Town01 is one of TransFuser's own training towns and it stalls there too, so this is not a
+Town10 mismatch. The residual cause is a model–environment limit: a 0.9.10-era checkpoint evaluated
+in 0.9.16, in a window shorter than its creep gate. That is a property of the evaluation setup, not
+a recorder defect, and no pipeline fix changes it. It is recorded here so the LiDAR-sign fix is not
+mistaken for a fix to the stall.

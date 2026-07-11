@@ -651,7 +651,9 @@ class TransFuserRuntime:
             )
         elif self.config.use_point_pillars:
             lidar_cloud = deepcopy(sensor_packet["lidar"][1])
-            lidar_cloud[:, 1] *= -1
+            # See prepare_lidar: CARLA 0.9.16 LiDAR already reports forward as -y,
+            # so the 0.9.10-era y negation is dropped. (use_point_pillars is False
+            # for the models_2022 checkpoint, so this branch is currently unused.)
             lidar_bev = [self.torch.tensor(lidar_cloud, device=self.device, dtype=self.torch.float32)]
             num_points = [
                 self.torch.tensor(len(lidar_cloud), device=self.device, dtype=self.torch.int32)
@@ -832,7 +834,9 @@ class TransFuserRuntime:
         if self.backbone == "latentTF" or "lidar" not in tick_data:
             return None
         safety_box = deepcopy(tick_data["lidar"])
-        safety_box[:, 1] *= -1
+        # See prepare_lidar: CARLA 0.9.16 LiDAR reports forward as -y, so the
+        # 0.9.10-era y negation would move forward obstacles out of the
+        # safety_box_y window [-3, 0] and the emergency brake would never see them.
         safety_box = safety_box[safety_box[..., 2] > self.config.safety_box_z_min]
         safety_box = safety_box[safety_box[..., 2] < self.config.safety_box_z_max]
         safety_box = safety_box[safety_box[..., 1] > self.config.safety_box_y_min]
@@ -884,7 +888,14 @@ class TransFuserRuntime:
 
     def prepare_lidar(self, tick_data: dict[str, Any]) -> Any:
         lidar_transformed = deepcopy(tick_data["lidar"])
-        lidar_transformed[:, 1] *= -1
+        # CARLA 0.9.16's ray-cast LiDAR already reports forward as -y (raw y in
+        # [-83, 0] on this route). TransFuser was written for 0.9.10, whose LiDAR
+        # reported forward as +y, so it negated y here to land points in the
+        # histogram window y in [-32, 0]. Under 0.9.16 that negation pushes forward
+        # points to +y, OUTSIDE the window: measured 26 of 16159 points survive
+        # instead of 11600, and the BEV is essentially empty -- the model then
+        # predicts a stationary trajectory and brakes every frame. Same family as
+        # the mirrored-GNSS bug; the fix is to drop the negation.
         lidar_transformed = self.torch.from_numpy(
             self.modules.lidar_to_histogram_features(lidar_transformed)
         ).unsqueeze(0)
