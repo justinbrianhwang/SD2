@@ -380,17 +380,30 @@ does. On 2/6 (11, 102) the failure is **over-determined**: the clean waypoints a
 that pose also encode a stop, so planning-restore stops it too. We report this
 rather than claiming a clean dissociation everywhere.
 
-**The unifying phenomenon (proposed name: "same-stressor semantic divergence").**
-The *same* corruption -- gaussian_noise s5 -- attacks the *semantic-perception
-stage* of both architectures, but because that stage encodes different things it
-diverges into **opposite, each-catastrophic** closed-loop failures: InterFuser
-hallucinates phantom obstacles and **freezes** (Sections 2-9), NEAT goes blind to
-the red light and **runs it** (here). In both, SD2 both localizes the failure to
-the semantic stage and **reverses the safety-critical behaviour by restoring a
-single internal semantic signal** -- object-density for InterFuser,
-`red_light_occ` for NEAT. We call this restoration capability *single-signal
-counterfactual reversal*: a correlational method can see neither the shared cause
-nor the single-signal fix.
+**The unifying phenomenon: divergent semantic collapse.** The *same* corruption
+-- gaussian_noise s5 -- attacks the *semantic-perception stage* of both
+architectures, but because that stage encodes different things it diverges into
+**opposite, each-catastrophic** closed-loop failures: InterFuser hallucinates
+phantom obstacles and **freezes** (Sections 2-9), NEAT goes blind to the red
+light and **runs it** (here). In both, SD2 both localizes the failure to the
+semantic stage and **reverses the safety-critical behaviour by restoring a single
+internal semantic signal** -- object-density for InterFuser, `red_light_occ` for
+NEAT. A correlational method can see neither the shared cause nor the
+single-signal fix.
+
+We name this diagnostic the **RUSH probe** (**R**estore-a-**U**nit-**S**emantic-
+signal; single-signal counterfactual reversal). [^rush] It restores one internal
+semantic signal at a fixed pose and asks whether the closed-loop safety behaviour
+flips -- the way retinal densitometry read a single pigment signal directly out
+of the living eye, RUSH reads and rewrites a single semantic signal inside the
+model.
+
+[^rush]: The name is a portmanteau: an homage to the vision physiologist
+    W. A. H. Rushton (retinal densitometry; the *principle of univariance* --
+    that a single receptor signal cannot by itself be disambiguated -- which
+    mirrors the single-signal dependence found here), and a description of the
+    failure itself, a vehicle that **rushes** through a red light. It is a
+    codename for the probe, not a claim that Rushton described this effect.
 
 **Honesty caveats.** (1) The lights are *forced* red by an external client -- a
 controlled, somewhat artificial elicitation, not natural signal cycling. (2) The
