@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from sd2.stressors import (
+    CompositeImageStressor,
     FrameRef,
     ImageStressor,
     SequenceStressor,
@@ -107,6 +108,22 @@ def test_new_cli_visual_stressors_produce_valid_images(stress_type: str) -> None
 
     assert output.shape == image.shape
     assert output.dtype == np.uint8
+
+
+def test_composite_image_stressor_stacks_visual_corruptions() -> None:
+    image = _synthetic_image()
+    contrast = build_stressor("contrast_shift")
+    low_light = build_stressor("low_light")
+    assert isinstance(contrast, ImageStressor)
+    assert isinstance(low_light, ImageStressor)
+    composite = CompositeImageStressor([(contrast, 5), (low_light, 5)])
+
+    contrast_only = contrast.apply_image(image, 5, np.random.default_rng(123))
+    output = composite.apply_image(image, 5, np.random.default_rng(123))
+
+    assert output.shape == image.shape
+    assert output.dtype == np.uint8
+    assert not np.array_equal(output, contrast_only)
 
 
 def test_sequence_stressors_are_deterministic_for_same_seed() -> None:

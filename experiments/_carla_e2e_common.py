@@ -21,7 +21,12 @@ from queue import Empty, Queue
 from threading import Lock
 from typing import Any, Callable, Mapping
 
-from sd2.stressors import ImageStressor, build_stressor, validate_severity
+from sd2.stressors import (
+    CompositeImageStressor,
+    ImageStressor,
+    build_stressor,
+    validate_severity,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -439,6 +444,8 @@ def parse_record_args(
     )
     parser.add_argument("--stress", choices=STRESS_CHOICES, default="none")
     parser.add_argument("--stress-severity", type=int, default=3)
+    parser.add_argument("--stress2", choices=STRESS_CHOICES, default="none")
+    parser.add_argument("--stress2-severity", type=int, default=3)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--spawn-index", type=int, default=0)
     parser.add_argument(
@@ -512,6 +519,11 @@ def parse_record_args(
     if args.stress != "none":
         try:
             validate_severity(args.stress_severity)
+        except ValueError as exc:
+            parser.error(str(exc))
+    if args.stress2 != "none":
+        try:
+            validate_severity(args.stress2_severity)
         except ValueError as exc:
             parser.error(str(exc))
     if model_id is not None:
@@ -822,6 +834,19 @@ def build_image_stressor(
     stressor = build_stressor(stressor_type)
     if not isinstance(stressor, ImageStressor):
         raise RuntimeError(f"stress {args.stress!r} is not an image stressor")
+    if args.stress2 != "none":
+        stressor2_type = (
+            "brightness_shift" if args.stress2 == "brightness" else args.stress2
+        )
+        stressor2 = build_stressor(stressor2_type)
+        if not isinstance(stressor2, ImageStressor):
+            raise RuntimeError(f"stress {args.stress2!r} is not an image stressor")
+        stressor = CompositeImageStressor(
+            [
+                (stressor, args.stress_severity),
+                (stressor2, args.stress2_severity),
+            ]
+        )
     rng = modules.np.random.default_rng(args.seed)
     logger.info("Using visual stressor: %s", stressor.describe(args.stress_severity))
     return stressor, rng

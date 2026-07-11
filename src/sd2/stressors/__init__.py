@@ -10,6 +10,7 @@ from sd2.stressors.base import (
     register_stressor,
     validate_severity,
 )
+from sd2.stressors.composite import CompositeImageStressor
 from sd2.stressors.temporal import (
     CameraBlackoutStressor,
     FrameDelayStressor,
@@ -29,6 +30,7 @@ from sd2.stressors.visual import (
 __all__ = [
     "BrightnessShiftStressor",
     "CameraBlackoutStressor",
+    "CompositeImageStressor",
     "ContrastShiftStressor",
     "FrameDelayStressor",
     "FrameDropStressor",
